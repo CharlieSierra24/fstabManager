@@ -1,0 +1,9 @@
+# build output
+dist/
+gui/fstab-manager
+# Python / editor leftovers
+__pycache__/
+*.pyc
+*~
+.vscode/
+.idea/

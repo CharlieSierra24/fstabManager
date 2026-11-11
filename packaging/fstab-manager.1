@@ -1,0 +1,57 @@
+.TH FSTAB-MANAGER 1 "2026" "fstab Manager" "User Commands"
+.SH NAME
+fstab\-manager \- desktop app for managing fstab mounts, backups and home links
+.SH SYNOPSIS
+.B fstab\-manager
+.RB [ \-\-size " \fIWIDTHxHEIGHT\fR]"
+.RB [ \-\-no\-notify ]
+.RB [ \-\-version ]
+.SH DESCRIPTION
+Opens the fstab Manager window. It shows fstab mounts with live status, explains problems and
+offers one\-click fixes, mounts drives without a reboot, previews every change as a diff before
+writing, manages home\-folder symlinks, and notices when a disk is plugged in.
+.PP
+The window is a native application using the system's WebKitGTK; there is no browser and no
+network port. Writing /etc/fstab or mounting asks for administrator rights through polkit
+(pkexec), or uses sudo if it is configured without a password.
+.PP
+Only one window runs at a time; starting the app again brings the existing window forward.
+.PP
+A splash screen is shown at startup and closes after 15 seconds; the ? button in the bottom\-left
+corner shows the same information (About) until closed.
+.SH AUTHOR
+csTechnologies, https://cstevens.ca
+.SH OPTIONS
+.TP
+.BI \-\-size " WIDTHxHEIGHT"
+Initial window size (default 1240x820).
+.TP
+.B \-\-no\-notify
+Do not send a desktop notification (via notify\-send) when a disk is plugged in.
+.TP
+.B \-\-version
+Print the version and exit.
+.SH ENVIRONMENT
+.TP
+.B FSTABCTL_FSTAB, FSTABCTL_BACKUP_DIR, FSTABCTL_HOME
+As for
+.BR fstabctl (1).
+.TP
+.B DISPLAY, WAYLAND_DISPLAY
+pkexec is used only when one of these is set.
+.SH FILES
+.TP
+.I ~/.local/share/fstabctl/backups/
+Shared with
+.BR fstabctl (1).
+.TP
+.I /usr/share/polkit\-1/actions/org.fstabctl.manager.policy
+Polkit action describing the password prompt.
+.SH NOTES
+Run it as your normal user and let polkit ask for your password when needed. The command
+.B fstabctl\-gui
+is kept as a link to this program for compatibility.
+.SH SEE ALSO
+.BR fstabctl (1)
+.PP
+Full documentation: /usr/share/doc/fstab-manager/

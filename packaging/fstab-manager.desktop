@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=fstab Manager
+GenericName=Disk mount manager
+Comment=Mount drives, fix fstab problems, back up and restore your mount settings
+Exec=fstab-manager
+Icon=fstab-manager
+Terminal=false
+Categories=System;Settings;
+Keywords=fstab;mount;disk;drive;backup;symlink;partition;
+StartupNotify=true
+StartupWMClass=fstab-manager

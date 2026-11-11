@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>fstab Manager</title>
+<style>
+:root{--bg:#f4f6f9;--card:#fff;--fg:#1b2130;--muted:#667085;--line:#e1e5ec;--accent:#2563eb;--accent-fg:#fff;
+--ok:#157f3b;--okbg:#e2f5e9;--warn:#9a5b00;--warnbg:#fff0d2;--bad:#b42318;--badbg:#fde3e0;--off:#475467;--offbg:#eceff3;--code:#f0f2f6;--shadow:0 1px 2px rgba(16,24,40,.06),0 4px 16px rgba(16,24,40,.06);
+--overlay:rgba(10,14,22,.55);--raised:#fff;--raised-line:#d5dae3;--raised-shadow:0 12px 40px rgba(16,24,40,.28)}
+@media (prefers-color-scheme:dark){:root{--bg:#0e121a;--card:#161b25;--fg:#e7eaf1;--muted:#98a2b3;--line:#262e3c;--accent:#5b8def;--accent-fg:#0a0f1c;
+--ok:#63d58e;--okbg:#112f1d;--warn:#f3b455;--warnbg:#34270d;--bad:#ff8c82;--badbg:#3a1613;--off:#b5bcc9;--offbg:#212936;--code:#0f141c;--shadow:0 1px 2px rgba(0,0,0,.4),0 4px 16px rgba(0,0,0,.35);
+--overlay:rgba(0,0,0,.74);--raised:#222a38;--raised-line:#3c475b;--raised-shadow:0 16px 48px rgba(0,0,0,.7)}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,Cantarell,sans-serif}
+header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--line);flex-wrap:wrap}
+header h1{font-size:17px;margin:0;font-weight:650}
+header .sub{color:var(--muted);font-size:12.5px}
+.grow{flex:1}
+nav{display:flex;gap:2px;padding:0 14px;background:var(--card);border-bottom:1px solid var(--line);overflow-x:auto}
+nav button{background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);padding:11px 14px;font:inherit;cursor:pointer;white-space:nowrap}
+nav button:hover{color:var(--fg)}
+nav button.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+main{max-width:1180px;margin:0 auto;padding:20px 20px 60px}
+h2{font-size:16px;margin:0}
+.toolbar{display:flex;align-items:center;gap:10px;margin:0 0 12px;flex-wrap:wrap}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);padding:16px;margin-bottom:16px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;box-shadow:var(--shadow)}
+.stat b{display:block;font-size:26px;line-height:1.1}.stat span{color:var(--muted);font-size:12.5px}
+.tablewrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600;background:var(--code)}
+tr:last-child td{border-bottom:0}tr.dim td{opacity:.6}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px;word-break:break-all}
+.small{font-size:12px}.muted{color:var(--muted)}
+.pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:600;white-space:nowrap}
+.pill.ok{background:var(--okbg);color:var(--ok)}.pill.warn{background:var(--warnbg);color:var(--warn)}
+.pill.bad{background:var(--badbg);color:var(--bad)}.pill.off{background:var(--offbg);color:var(--off)}
+.chip{display:inline-block;background:var(--code);border:1px solid var(--line);border-radius:6px;padding:1px 7px;margin:1px 3px 1px 0;font:12px ui-monospace,Menlo,Consolas,monospace;color:var(--fg)}
+button.btnchip{cursor:pointer}button.btnchip:hover{border-color:var(--accent)}
+.btn{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+.btn:hover:not(:disabled){border-color:var(--accent)}
+.btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
+.btn.danger{color:var(--bad)}.btn:disabled{opacity:.45;cursor:not-allowed}
+td.actions{white-space:nowrap}td.actions .btn{margin-right:5px;padding:3px 9px;font-size:12.5px}
+.banner{padding:10px 14px;border-radius:10px;margin-bottom:16px;background:var(--warnbg);color:var(--warn);border:1px solid var(--line)}
+.finding{display:flex;border-bottom:1px solid var(--line)}.finding:last-child{border:0}
+.overlay{position:fixed;inset:0;background:var(--overlay);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);display:flex;align-items:flex-start;justify-content:center;padding:6vh 14px;overflow:auto;z-index:30}
+.dialog{background:var(--raised);border-radius:14px;box-shadow:var(--raised-shadow);width:min(760px,100%);padding:20px;border:1px solid var(--raised-line)}
+.dialog input,.dialog select,.dialog .btn:not(.primary):not(.danger){background-color:var(--card)}
+.dialog h3{margin:0 0 12px;font-size:16px}.dfoot{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.cmd{font:12px ui-monospace,Menlo,Consolas,monospace;color:var(--muted);margin-bottom:8px;word-break:break-all}
+pre.out{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:10px;max-height:46vh;overflow:auto;margin:0;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+.out .add{color:var(--ok)}.out .del{color:var(--bad)}.out .hunk{color:var(--accent)}
+.form{display:grid;grid-template-columns:150px minmax(0,1fr);gap:14px 14px;align-items:start}
+.form label{color:var(--muted);font-size:13px}
+.form>label,.form>.contents>label{padding-top:7px}
+.form .full{grid-column:1/-1}
+.form input:not([type=checkbox]),.form select{width:100%}
+.contents{display:contents}
+.contents.hide{display:none}
+.hint{color:var(--muted);font-size:12px;line-height:1.4;margin-top:5px}
+.hint code{font:12px ui-monospace,Menlo,Consolas,monospace;background:var(--code);border:1px solid var(--line);border-radius:5px;padding:0 5px}
+input,select{font:inherit;padding:6px 9px;border-radius:8px;border:1px solid var(--line);background-color:var(--card);color:var(--fg);min-width:0}
+:root{color-scheme:light dark}
+/* Draw dropdowns ourselves: the built-in style ignores the app's dark theme. */
+select{-webkit-appearance:none;appearance:none;padding-right:30px;cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23889' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center}
+select option{background:var(--card);color:var(--fg)}
+input.wide{width:100%}
+.pickrow{display:flex;gap:8px;align-items:center}.pickrow input{flex:1;min-width:0}input[type=checkbox]{margin-right:7px}
+.hide{display:none}
+.toast{position:fixed;right:18px;bottom:54px;background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:10px;z-index:40;box-shadow:var(--shadow);max-width:80vw}
+.toast.bad{background:var(--bad);color:#fff}
+#alerts{position:fixed;top:112px;right:16px;display:flex;flex-direction:column;gap:10px;z-index:25;max-width:min(430px,92vw)}
+.alert{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:10px;box-shadow:var(--shadow);padding:12px 14px}
+.alert.info{border-left-color:var(--off)}.alert b{display:block;margin-bottom:2px}
+.alert .row{display:flex;gap:8px;margin-top:10px;justify-content:flex-end}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+header img{width:26px;height:26px;display:block}
+#top{position:sticky;top:0;z-index:15}
+.finding{flex-direction:column;gap:4px;padding:10px 0}
+.finding .head{display:flex;gap:10px;align-items:baseline}
+.finding .detail{margin-left:58px;color:var(--muted);font-size:13px}
+.finding .detail b{color:var(--fg);font-weight:600}
+.finding .acts{margin:6px 0 0 58px;display:flex;gap:6px;flex-wrap:wrap}
+.finding .acts .btn{padding:3px 10px;font-size:12.5px}
+.chosen{font-size:13px;margin-left:8px}
+#corner{position:fixed;left:0;right:0;bottom:0;height:40px;display:flex;align-items:center;gap:10px;padding:0 14px;
+  background:var(--card);border-top:1px solid var(--line);box-shadow:0 -1px 6px rgba(0,0,0,.06);z-index:12}
+#ver{font-size:12px;color:var(--muted)}
+#helpbtn{width:28px;height:28px;border-radius:50%;border:0;background:var(--accent);color:var(--accent-fg);
+  font:700 15px/1 system-ui,sans-serif;cursor:pointer;padding:0;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+#helpbtn:hover{filter:brightness(1.12)}
+#helpbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.about{position:relative;width:min(560px,100%);padding:48px 28px 22px;text-align:center;margin-top:6vh;border-top:3px solid var(--accent)}
+.about .x{position:absolute;top:8px;right:8px;width:32px;height:32px;border-radius:8px;border:0;background:transparent;
+  color:var(--muted);font-size:22px;line-height:1;cursor:pointer}
+.about .x:hover{background:var(--card);color:var(--fg)}
+.about .x:focus{outline:none}.about .x:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.about .logo{background:#fff;border-radius:12px;padding:10px 14px;margin:4px 0 14px}
+.about .logo img{width:100%;max-width:420px;display:block;margin:0 auto}
+.about p{margin:6px 0;color:var(--muted)}
+.about .verline{font-size:15px;color:var(--fg);font-weight:600}
+.about .author{margin-top:14px;font-size:14px;color:var(--fg)}
+.about .author button{font:inherit;color:var(--accent);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline}
+.about .meta{font-size:12px;margin-top:14px}
+.about .count{margin-top:16px;font-size:12px;color:var(--muted)}
+.about .bar{height:4px;border-radius:2px;background:var(--line);overflow:hidden;margin-top:6px}
+.about .bar i{display:block;height:100%;background:var(--accent);width:100%;transition:width 1s linear}
+</style></head>
+<body>
+<div id="top"><header>
+  <img src="/icon.png" alt=""><h1>fstab Manager</h1><span class="sub" id="hostinfo"></span><span class="grow"></span>
+  <span class="pill off" id="watchchip" title="Live disk detection">○ disk watch</span>
+  <span class="pill off" id="privchip"></span>
+  <button class="btn" id="quit" title="Close fstab Manager">Quit</button>
+</header>
+<nav id="tabs"></nav></div>
+<div id="alerts"></div>
+<div id="corner"><button id="helpbtn" title="About fstab Manager" aria-label="About fstab Manager">?</button><span id="ver"></span></div>
+<main id="main">Loading…</main>
+<script>
+"use strict";
+const TABS=[["overview","Overview"],["mounts","Mounts"],["disks","Disks"],["links","Home links"],["backups","Backups"],["transfer","Export / Import"]];
+let S=null, tab=(location.hash||"#overview").slice(1), linkOpts={depth:1,hidden:false};
+if(!TABS.some(t=>t[0]===tab)) tab="overview";
+
+function el(tag,attrs,...kids){
+  const e=document.createElement(tag);
+  for(const [k,v] of Object.entries(attrs||{})){
+    if(k==="class") e.className=v;
+    else if(k.startsWith("on")) e.addEventListener(k.slice(2),v);
+    else if(v===true) e.setAttribute(k,"");
+    else if(v!==false&&v!=null) e.setAttribute(k,v);
+  }
+  for(const k of kids.flat(2)){ if(k==null||k===false) continue; e.append(k.nodeType?k:document.createTextNode(String(k))); }
+  return e;
+}
+const btn=(label,onclick,cls,disabled)=>el("button",{class:"btn "+(cls||""),onclick,disabled:!!disabled,type:"button"},label);
+async function api(path,opts){
+  const o=Object.assign({},opts||{});
+  o.headers=Object.assign({"Content-Type":"application/json"},o.headers||{});
+  const r=await fetch(path,o);
+  if(!r.ok) throw new Error((await r.text())||r.statusText);
+  return r;
+}
+async function load(){
+  try{ S=await (await api(`/api/state?depth=${linkOpts.depth}&hidden=${linkOpts.hidden?1:0}`)).json(); render(); }
+  catch(e){ document.getElementById("main").textContent="Could not read the current state: "+e.message; }
+}
+function toast(msg,bad){
+  const t=el("div",{class:"toast"+(bad?" bad":"")},msg); document.body.append(t); setTimeout(()=>t.remove(),4200);
+}
+const PILL={mounted:"ok",active:"ok",ok:"ok","not mounted":"warn",inactive:"warn","device missing":"bad",BROKEN:"bad",disabled:"off"};
+const pill=s=>el("span",{class:"pill "+(PILL[s]||"off")},s);
+const tableEl=(heads,rows)=>el("div",{class:"tablewrap"},el("table",{},el("thead",{},el("tr",{},heads.map(h=>el("th",{},h)))),el("tbody",{},rows)));
+const slug=s=>(s||"share").replace(/[^A-Za-z0-9._-]+/g,"-").replace(/^-+|-+$/g,"")||"share";
+const native=()=>window.go&&window.go.main&&window.go.main.App;
+async function saveExport(kind){
+  if(!native()) return toast("Saving needs the fstab Manager window",true);
+  try{
+    const path=await native().SaveExport(kind);
+    if(!path) return;   // cancelled
+    const box=alertBox("Saved",path,[btn("Show in folder",()=>{ native().ShowInFolder(path).catch(e=>toast(String(e),true)); box.remove(); })],"info");
+    setTimeout(()=>box.remove(),15000);
+  }catch(e){ toast("Could not save: "+e,true); }
+}
+const firstError=t=>{ const l=(t||"").split("\n").find(x=>x.startsWith("error:")); return l?l.slice(6).trim():""; };
+
+/* ---------- modal + action runner ---------- */
+function modal(title,body,foot){
+  const ov=el("div",{class:"overlay",onclick:e=>{if(e.target===ov)ov.remove();}},
+    el("div",{class:"dialog",role:"dialog","aria-label":title},el("h3",{},title),el("div",{},body),el("div",{class:"dfoot"},foot)));
+  document.body.append(ov); return {close:()=>ov.remove()};
+}
+document.addEventListener("keydown",e=>{ if(e.key==="Escape"){ const o=document.querySelectorAll(".overlay"); if(o.length) o[o.length-1].remove(); }});
+function renderOut(pre,text){
+  pre.textContent="";
+  for(const line of text.split("\n")){
+    let c="";
+    if(line.startsWith("@@")) c="hunk"; else if(line.startsWith("+++")||line.startsWith("---")) c="hunk";
+    else if(line.startsWith("+")) c="add"; else if(line.startsWith("-")) c="del";
+    pre.append(el("span",{class:c},line+"\n"));
+  }
+}
+async function run(args,apply){
+  const r=await api("/api/run",{method:"POST",body:JSON.stringify({args,apply})}); return r.json();
+}
+async function runAction(title,args,opts){
+  opts=opts||{};
+  const out=el("pre",{class:"out"},"Working…");
+  let m;
+  const cancel=btn(opts.readonly?"Close":"Cancel",()=>m.close());
+  const apply=btn("Apply",async()=>{
+    apply.disabled=true; apply.textContent="Applying…"; out.textContent="";
+    try{
+      const r=await run(args,true); renderOut(out,r.output);
+      toast(r.code===0?"Done":(firstError(r.output)||"Failed – see the details in the dialog"),r.code!==0);
+    }catch(e){ out.textContent=String(e); }
+    apply.remove(); cancel.textContent="Close"; load();
+  },"primary",true);
+  m=modal(title,[el("div",{class:"cmd"},"fstabctl "+args.join(" ")),out],opts.readonly?[cancel]:[cancel,apply]);
+  try{
+    const r=await run(args,false); renderOut(out,r.output);
+    if(!opts.readonly) apply.disabled=r.code!==0||/Nothing to (change|do|import)/.test(r.output);
+  }catch(e){ out.textContent=String(e); }
+}
+async function quick(args,msg){
+  try{ const r=await run(args,true); toast(r.code===0?msg:(firstError(r.output)||r.output.split("\n").slice(-2).join(" ")),r.code!==0); load(); }
+  catch(e){ toast(String(e),true); }
+}
+
+/* ---------- views ---------- */
+const LEVEL={error:["bad","PROBLEM"],warn:["warn","WARNING"],info:["off","NOTE"]};
+function findingEl(f){
+  const [cls,label]=LEVEL[f.level]||LEVEL.info;
+  return el("div",{class:"finding"},
+    el("div",{class:"head"},el("span",{class:"pill "+cls,style:"min-width:48px;text-align:center"},label),el("span",{},f.text)),
+    f.why?el("div",{class:"detail"},el("b",{},"Why it matters: "),f.why):null,
+    f.fix?el("div",{class:"detail"},el("b",{},"What to do: "),f.fix):null,
+    (f.actions||[]).length?el("div",{class:"acts"},f.actions.map((a,i)=>btn(a.label+(a.args[0]==="mount"?"":"…"),
+      ()=>a.args[0]==="mount"?mountAction(a.label+": "+a.args.slice(1).join(" "),a.args):runAction(a.label,a.args),i===0?"primary":""))):null);
+}
+// Mounting shows what will happen first, like every other change.
+function mountAction(title,args){ runAction(title.startsWith("Mount")?title:"Mount",args); }
+const mountAll=()=>runAction("Mount all drives now",["mount","--all"]);
+
+/* ---------- splash / about ---------- */
+const AUTHOR="csTechnologies", AUTHOR_URL="https://cstevens.ca", SPLASH_SECONDS=15;
+// showAbout(true) is the startup splash: it closes itself after 15 seconds.
+// showAbout(false) is About, opened with the ? button: it stays until closed.
+function showAbout(splash){
+  document.querySelectorAll(".overlay.aboutbox").forEach(o=>o.remove());
+  const ver=(S&&S.info&&S.info.version)||"";
+  const site=el("button",{title:"Open "+AUTHOR_URL+" in your browser"},"cstevens.ca");
+  site.addEventListener("click",()=>{ if(native()) native().OpenWebsite().catch(e=>toast(String(e),true)); });
+  const x=el("button",{class:"x",title:"Close","aria-label":"Close"},"×");
+  const box=el("div",{class:"dialog about",role:"dialog","aria-label":"About fstab Manager"},x,
+    el("div",{class:"logo"},el("img",{src:"/logo.png",alt:"fstab Manager"})),
+    el("p",{class:"verline"},"fstab Manager"+(ver?" "+ver:"")),
+    el("p",{},"Mount drives, fix fstab problems, and back up and restore your mount settings: safely, with a preview of every change."),
+    el("p",{class:"author"},"Author: ",el("b",{},AUTHOR)," · ",site),
+    el("p",{class:"meta"},"Companion command-line tool: fstabctl · Built with Go, Wails and WebKitGTK · MIT License"));
+  const ov=el("div",{class:"overlay aboutbox"},box);
+  let timer=null;
+  const close=()=>{ if(timer) clearInterval(timer); ov.remove(); };
+  x.addEventListener("click",close);
+  ov.addEventListener("click",e=>{ if(e.target===ov&&!splash) close(); });
+  if(splash){
+    let left=SPLASH_SECONDS;
+    const txt=el("span",{},""), fill=el("i");
+    const tick=()=>{ txt.textContent="Closes in "+left+" second"+(left===1?"":"s"); fill.style.width=(left/SPLASH_SECONDS*100)+"%"; };
+    box.append(el("div",{class:"count"},txt,el("div",{class:"bar"},fill)));
+    tick();
+    timer=setInterval(()=>{ if(!ov.isConnected){ clearInterval(timer); return; } left--; if(left<=0) close(); else tick(); },1000);
+  }
+  document.body.append(ov);
+}
+function viewOverview(){
+  const en=S.entries, n=f=>en.filter(f).length;
+  const stats=[["fstab entries",en.length],["mounted / active",n(e=>e.status==="mounted"||e.status==="active")],
+    ["device missing",n(e=>e.status==="device missing")],["disabled",n(e=>!e.enabled)],["broken home links",S.links.filter(l=>!l.ok).length]];
+  const wrap=el("div",{},el("div",{class:"cards"},stats.map(([k,v])=>el("div",{class:"stat"},el("b",{},v),el("span",{},k)))));
+  const finds=[...S.errors,...S.warnings];
+  wrap.append(el("div",{class:"card"},el("h2",{},"Findings"),
+    finds.length?finds.map(findingEl):el("p",{class:"muted"},"No problems found.")));
+  const free=S.devices.filter(d=>d.candidate&&!d.in_fstab&&!d.mounts.length);
+  wrap.append(el("div",{class:"card"},el("h2",{},"Disks not in fstab"),
+    free.length?tableEl(["Device","Filesystem","Size","Label",""],free.map(d=>el("tr",{},el("td",{class:"mono"},d.path),el("td",{},d.fstype),el("td",{},d.size),
+      el("td",{},d.label||"–"),el("td",{class:"actions"},btn("Add to fstab…",()=>addDialog(d),"primary")))))
+      :el("p",{class:"muted"},"Every formatted disk is either mounted or already configured.")));
+  wrap.append(el("div",{class:"card"},el("h2",{},"Quick actions"),el("div",{class:"toolbar",style:"margin-top:10px"},
+    btn("Back up fstab now",()=>quick(["backup","--note","from GUI"],"fstab backed up")),
+    btn("Back up home links now",()=>quick(["link","backup","--note","from GUI"],"Link snapshot saved")),
+    btn("Mount all drives now…",mountAll),
+    btn("Save report (.md)…",()=>saveExport("report-md")),
+    btn("Save bundle (.json)…",()=>saveExport("bundle")))));
+  return wrap;
+}
+
+function viewMounts(){
+  const wrap=el("div",{},el("div",{class:"toolbar"},el("h2",{},"fstab entries"),el("span",{class:"grow"}),
+    btn("Mount all now…",mountAll),btn("Add mount…",()=>addDialog(),"primary")));
+  const rows=S.entries.map(e=>{
+    const target=String(e.n);   // entry number, guarded by --expect below
+    const g=[...(e.spec?["--expect",e.spec]:[])];
+    const canMount=e.status==="not mounted"&&!e.system;
+    const real=e.resolves&&!["network","pseudo"].includes(e.resolves)?el("div",{class:"small muted mono"},"→ "+e.resolves):null;
+    return el("tr",{class:e.enabled?"":"dim"},el("td",{},pill(e.status)),
+      el("td",{},el("div",{class:"mono"},e.spec),real),el("td",{class:"mono"},e.file),el("td",{},e.fstype),
+      el("td",{},e.help.map(([o,t])=>el("span",{class:"chip",title:t||""},o))),
+      el("td",{class:"actions"},canMount?btn("Mount now",()=>runAction("Mount "+e.file,["mount",target,...g]),"primary"):null,
+        btn("Edit",()=>editDialog(e)),
+        btn(e.enabled?"Disable":"Enable",()=>runAction((e.enabled?"Disable ":"Enable ")+e.file,[e.enabled?"disable":"enable",target,...g])," ",e.system&&e.enabled),
+        btn("Remove",()=>runAction("Remove "+e.file,["remove",target,...g]),"danger",e.system)));
+  });
+  wrap.append(rows.length?tableEl(["Status","Device","Mount point","Type","Options",""],rows):el("p",{class:"muted"},"No entries in "+S.info.fstab+"."));
+  wrap.append(el("p",{class:"muted small"},"“Mount now” mounts a drive without rebooting. Boot-critical mounts (/, /boot, EFI) can't be disabled or removed here; use the command line with --force if you really need to."));
+  return wrap;
+}
+
+function viewDisks(){
+  const rows=S.devices.map(d=>el("tr",{},el("td",{class:"mono"},d.path),el("td",{},d.size),el("td",{},d.type),el("td",{},d.fstype||""),
+    el("td",{},d.label||""),el("td",{class:"mono"},d.uuid||""),el("td",{class:"mono"},d.mounts.join(", ")),
+    el("td",{},d.candidate?(d.in_fstab?el("span",{class:"pill ok"},"in fstab"):el("span",{class:"pill warn"},"not in fstab")):"–"),
+    el("td",{class:"actions"},d.candidate&&!d.in_fstab?btn("Add…",()=>addDialog(d),"primary"):null)));
+  return el("div",{},el("div",{class:"toolbar"},el("h2",{},"Disks & partitions"),el("span",{class:"grow"}),btn("Refresh",load)),
+    rows.length?tableEl(["Device","Size","Type","FS","Label","UUID","Mounted at","fstab",""],rows):el("p",{class:"muted"},"lsblk returned nothing."));
+}
+
+const KF_STATE={link:"",empty:"Empty folder on this computer",missing:"Doesn’t exist yet",other:""};
+let discovered=null, discoverOpts={hidden:false,byApp:false}, discovering=false;
+const isTopLevel=n=>!n.includes("/")&&!n.startsWith(".");
+function viewLinks(){
+  const wrap=el("div",{});
+  // --- key folders
+  const kf=(S.key_folders||[]).map(k=>{
+    let where, status=null, acts=[];
+    if(k.state==="link"){
+      where=el("span",{class:"mono"},"→ "+k.target); status=pill(k.ok?"ok":"BROKEN");
+      acts.push(btn("Repoint…",()=>repointDialog({name:k.name,target:k.target})),
+        btn("Make local again…",()=>runAction("Make ~/"+k.name+" a local folder again",["link","remove",k.name,"--restore-folder"])));
+    }else if(k.state==="empty"||k.state==="missing"){
+      where=el("span",{},KF_STATE[k.state]);
+      acts.push(btn("Link to a folder…",()=>keyFolderDialog(k),"primary"));
+    }else if(k.state==="files"){
+      where=el("span",{},"On this computer, "+k.items+" item"+(k.items===1?"":"s"),
+        el("div",{class:"small muted"},"Only an empty folder can be linked elsewhere. Move its files there first."));
+      const b=btn("Link to a folder…",()=>{}," ",true); b.title="Only an empty folder can be linked elsewhere. Move its files first.";
+      acts.push(b);
+    }else{ where=el("span",{class:"muted"},k.note||"not a normal folder"); }
+    if(k.custom) acts.push(btn("Remove from list",()=>quick(["link","folders","remove",k.name],"Removed ~/"+k.name+" from Key folders")));
+    return el("tr",{},el("td",{},el("b",{},k.name),k.custom?el("span",{class:"small muted"}," (yours)"):null),
+      el("td",{},where,k.note&&k.state==="link"?el("div",{class:"small muted"},k.note):null),el("td",{},status),el("td",{class:"actions"},acts));
+  });
+  wrap.append(el("div",{class:"toolbar"},el("h2",{},"Key folders"),el("span",{class:"grow"}),btn("Add a folder…",addKeyFolderDialog)),
+    el("p",{class:"small muted",style:"margin:-4px 0 10px"},"Your main folders. An empty one can be linked to any other folder: on a data drive, a network share, a synced folder "+
+      "(Nextcloud, Dropbox…) or elsewhere on this computer. It stays at the same place in your home folder, and the link is "+
+      "saved in your backups and bundles."),
+    tableEl(["Folder","Where it is","Status",""],kf));
+
+  // --- links list
+  const depth=el("select",{onchange:e=>{linkOpts.depth=+e.target.value;load();}},[1,2,3].map(n=>el("option",{value:n,selected:linkOpts.depth===n},"depth "+n)));
+  const hid=el("input",{type:"checkbox",checked:linkOpts.hidden,onchange:e=>{linkOpts.hidden=e.target.checked;load();}});
+  wrap.append(el("div",{class:"toolbar",style:"margin-top:22px"},el("h2",{},"Links in "+S.info.home),el("span",{class:"grow"}),depth,
+    el("label",{class:"small"},hid,"hidden"),btn("New link…",()=>newLinkDialog(),"primary")));
+  const rows=S.links.map(l=>el("tr",{},el("td",{class:"mono"},"~/"+l.name),el("td",{class:"mono"},l.target),
+    el("td",{},pill(l.ok?"ok":"BROKEN")),el("td",{class:"small muted"},l.note),keptCell(l),
+    el("td",{class:"actions"},btn("Repoint…",()=>repointDialog(l)),btn("Remove",()=>runAction("Remove link ~/"+l.name,["link","remove",l.name]),"danger"))));
+  wrap.append(rows.length?tableEl(["Link","Target","Status","Note","In backups",""],rows)
+    :el("p",{class:"muted"},"No links found at this depth. Create one with “New link…”, or search with Discover below."));
+
+  // --- discover
+  const hidBox=el("input",{type:"checkbox",checked:discoverOpts.hidden,onchange:e=>{discoverOpts.hidden=e.target.checked;}});
+  const appBox=el("input",{type:"checkbox",checked:discoverOpts.byApp,onchange:e=>{discoverOpts.byApp=e.target.checked;render();}});
+  wrap.append(el("div",{class:"toolbar",style:"margin-top:22px"},el("h2",{},"Discover links"),el("span",{class:"grow"}),
+    el("label",{class:"small"},hidBox,"search hidden folders too"),el("label",{class:"small"},appBox,"show links made by apps"),
+    btn(discovering?"Searching…":"Search my home folder",runDiscover,"primary",discovering)),
+    el("p",{class:"small muted",style:"margin:-4px 0 10px"},"Finds links you made anywhere in your home folder (up to 6 folders deep). Links directly in your home folder are always kept in backups; "+
+      "use “Keep” for others you want back after a reinstall. App caches and other mounted drives are skipped."));
+  if(discovered){
+    const list=discovered.links.filter(d=>discoverOpts.byApp||!d.by_app);
+    const hiddenCount=discovered.links.length-list.length;
+    const dr=list.map(d=>el("tr",{},el("td",{class:"mono"},"~/"+d.name),el("td",{class:"mono"},d.target),el("td",{},pill(d.ok?"ok":"BROKEN")),
+      el("td",{class:"small muted"},d.by_app?"probably made by an app":(d.note||"")),keptCell(d)));
+    wrap.append(dr.length?tableEl(["Link","Target","Status","Note","In backups"],dr):el("p",{class:"muted"},"No links found."),
+      el("p",{class:"small muted"},list.length+" shown"+(hiddenCount?", "+hiddenCount+" made by apps hidden":"")+(discovered.truncated?" · the search stopped early (limit reached)":"")));
+  }
+  return wrap;
+}
+function keptCell(l){
+  if(isTopLevel(l.name)&&!l.tracked) return el("td",{},el("span",{class:"small"},"kept (top level)"));
+  if(l.tracked) return el("td",{},el("span",{class:"small"},"kept "),btn("Stop",()=>quick(["link","untrack",l.name],"~/"+l.name+" no longer kept").then(refreshDiscover)));
+  return el("td",{},btn("Keep",()=>quick(["link","track",l.name],"~/"+l.name+" will be kept in backups").then(refreshDiscover),"primary"));
+}
+async function runDiscover(){
+  discovering=true; render();
+  try{ discovered=await (await api("/api/discover?hidden="+(discoverOpts.hidden?1:0))).json(); }
+  catch(e){ toast("Search failed: "+e.message,true); }
+  discovering=false; render();
+}
+function refreshDiscover(){ if(discovered) runDiscover(); }
+// Folders where a whole drive is mounted (for example /mnt/data or /media/you/USB).
+function driveRoots(){
+  const r=new Set();
+  (S.entries||[]).forEach(e=>{ if(e.status==="mounted"&&e.file&&e.file.startsWith("/")&&e.file!=="/") r.add(e.file); });
+  (S.devices||[]).forEach(d=>(d.mounts||[]).forEach(m=>{ if(m&&m!=="/"&&m.startsWith("/")) r.add(m); }));
+  return r;
+}
+// Where your other key folders already link to: if Documents -> /storage/Documents,
+// then /storage is the likely home for Music too.
+function keyFolderBase(){
+  const count={};
+  (S.key_folders||[]).forEach(f=>{
+    if(f.state!=="link"||!f.target||!f.target.startsWith("/")) return;
+    const parent=f.target.replace(/\/+$/,"").split("/").slice(0,-1).join("/");
+    if(parent) count[parent]=(count[parent]||0)+1;
+  });
+  return Object.keys(count).sort((a,b)=>count[b]-count[a])[0]||"";
+}
+function keyFolderDialog(k){
+  const base=keyFolderBase(), guess=base?base+"/"+k.name:"";
+  const target=el("input",{class:"wide mono",placeholder:guess||"/storage/"+k.name});
+  const guessRow=guess?el("div",{class:"hint"},"Your other key folders link into "+base+". ",
+    btn("Use "+guess,()=>{ target.value=guess; target.dispatchEvent(new Event("input")); })):null;
+  const mk=el("input",{type:"checkbox",checked:true});
+  // If you pick the top of a mounted drive (say /mnt/data), suggest a folder
+  // named after this one inside it, so ~/Documents doesn't point at the whole drive.
+  const suggest=el("div",{class:"hint"}), roots=driveRoots();
+  target.addEventListener("input",()=>{
+    suggest.textContent="";
+    const t=target.value.trim().replace(/\/+$/,""); const base=t.split("/").pop();
+    if(!t||base===k.name||!roots.has(t)) return;
+    const better=t+"/"+k.name;
+    suggest.append(t+" is the top of a drive, so ~/"+k.name+" would show the whole drive. ",
+      btn("Use "+better+" instead",()=>{ target.value=better; target.dispatchEvent(new Event("input")); }));
+  });
+  const go=btn("Preview…",()=>{
+    const t=target.value.trim(); if(!t) return toast("Choose the folder to link to",true);
+    const a=["link","add",t,k.name,"--replace-empty"]; if(mk.checked) a.push("--mkdir-target");
+    m.close(); runAction("Link ~/"+k.name+" to "+t,a);
+  },"primary");
+  const m=modal("Link ~/"+k.name+" to a folder",el("div",{class:"form"},
+    field("Folder",pathPicker(target,"Choose the folder ~/"+k.name+" should link to",base),
+      el("div",{},guessRow,el("div",{class:"hint"},"Any folder you can open, for example /storage/"+k.name+", /mnt/data/"+k.name+", a network share, "+
+        "a synced folder such as ~/Nextcloud/"+k.name+", or anywhere else. Type it, or use Browse… to pick it. If it's on a drive or share, "+
+        "make sure that mounts at startup so the folder is always there."),suggest)),
+    field("",el("label",{class:"small"},mk,"Create it if it doesn’t exist")),
+    field("What happens",el("div",{class:"small"},(k.state==="empty"?"The empty folder ~/"+k.name+" is replaced by a link":"A link ~/"+k.name+" is created")+
+      " to that folder. Apps keep using ~/"+k.name+", and the files are stored in the folder you chose. You can undo it with “Make local again…”."))),
+    [btn("Cancel",()=>m.close()),go]);
+}
+function addKeyFolderDialog(){
+  const name=el("input",{class:"wide",placeholder:"Claude Assistance"});
+  const go=btn("Add",()=>{ const n=name.value.trim(); if(!n) return toast("Enter a folder name",true); m.close(); quick(["link","folders","add",n],"Added ~/"+n+" to Key folders"); },"primary");
+  name.addEventListener("keydown",e=>{ if(e.key==="Enter") go.click(); });
+  const m=modal("Add a key folder",el("div",{class:"form"},
+    field("Folder name",name,el("div",{class:"hint"},"A folder in your home folder, for example “Claude Assistance” or “Projects/Photos”. It doesn’t need to exist yet."))),
+    [btn("Cancel",()=>m.close()),go]);
+  setTimeout(()=>name.focus(),50);
+}
+
+function viewBackups(){
+  const b=S.backups.map(x=>el("tr",{},el("td",{class:"mono"},x.id),el("td",{},x.created),el("td",{},x.entries),el("td",{class:"small"},x.note||""),
+    el("td",{class:"actions"},btn("Diff",()=>runAction("Diff: backup "+x.id+" vs current",["diff",x.id],{readonly:true})),
+      btn("Restore…",()=>runAction("Restore fstab from "+x.id,["restore",x.id])))));
+  const l=S.link_snaps.map(x=>el("tr",{},el("td",{class:"mono"},x.id),el("td",{},x.created),el("td",{},x.links),el("td",{class:"small"},x.note||""),
+    el("td",{class:"actions"},btn("Restore…",()=>runAction("Restore links from "+x.id,["link","restore",x.id])))));
+  return el("div",{},
+    el("div",{class:"toolbar"},el("h2",{},"fstab backups"),el("span",{class:"grow"}),btn("Back up now",()=>quick(["backup","--note","from GUI"],"fstab backed up"),"primary")),
+    b.length?tableEl(["ID","Created","Entries","Note",""],b):el("p",{class:"muted"},"No backups yet. One is created automatically before every change."),
+    el("div",{class:"toolbar",style:"margin-top:22px"},el("h2",{},"Home link snapshots"),el("span",{class:"grow"}),btn("Snapshot now",()=>quick(["link","backup","--note","from GUI"],"Link snapshot saved"),"primary")),
+    l.length?tableEl(["ID","Created","Links","Note",""],l):el("p",{class:"muted"},"No link snapshots yet."),
+    el("p",{class:"muted small",style:"margin-top:14px"},"Stored in "+S.info.backup_dir));
+}
+
+let chosenBundle=null;
+function viewTransfer(){
+  const incSys=el("input",{type:"checkbox"}), skipMiss=el("input",{type:"checkbox"});
+  const shown=el("span",{class:"chosen "+(chosenBundle?"":"muted")},chosenBundle?chosenBundle.name:"No file chosen");
+  const choose=btn("Choose bundle…",async()=>{
+    if(!native()) return toast("Choosing a file needs the fstab Manager window",true);
+    try{ const r=await native().ChooseBundle(); if(r){ chosenBundle=r; shown.textContent=r.name; shown.className="chosen"; } }
+    catch(e){ toast(String(e),true); }
+  });
+  function withUpload(cb){ if(!chosenBundle) return toast("Choose a bundle file first",true); cb(chosenBundle.path); }
+  return el("div",{class:"grid2"},
+    el("div",{class:"card"},el("h2",{},"Export"),el("p",{class:"muted"},"Save your setup before switching distros or rebuilding."),
+      el("div",{class:"toolbar"},btn("Report (.md)…",()=>saveExport("report-md")),
+        btn("Report (.txt)…",()=>saveExport("report-txt")),
+        btn("Portable bundle (.json)…",()=>saveExport("bundle"),"primary")),
+      el("p",{class:"small muted"},"You choose where each file goes; the Save dialog opens in your Downloads folder."),
+      el("p",{class:"small muted"},"The bundle holds your fstab entries, disk inventory and home links. It contains no passwords (only the paths of credentials files).")),
+    el("div",{class:"card"},el("h2",{},"Import a bundle"),el("p",{class:"muted"},"Run on the rebuilt system. Disks that were reformatted are re-linked by label; missing devices are kept as disabled entries."),
+      el("div",{class:"form"},el("label",{},"Bundle file"),el("div",{},choose,shown),
+        el("label",{},"Options"),el("div",{},el("label",{class:"small"},incSys,"also import /, /boot, EFI"),el("br"),el("label",{class:"small"},skipMiss,"skip entries/links whose target is missing")),
+        el("span",{class:"full"},el("div",{class:"toolbar"},
+          btn("Preview fstab import…",()=>withUpload(p=>runAction("Import fstab entries",["import",p,...(incSys.checked?["--include-system"]:[]),...(skipMiss.checked?["--skip-missing"]:[])])),"primary"),
+          btn("Preview link import…",()=>withUpload(p=>runAction("Import home links",["link","import",p,...(skipMiss.checked?["--skip-missing"]:[])]))))))));
+}
+
+/* ---------- dialogs ---------- */
+const PRESET_LABEL={data:"Internal disk",ssd:"SSD / NVMe",usb:"Removable USB drive",windows:"NTFS / exFAT / FAT",nfs:"NFS share",cifs:"SMB / CIFS share"};
+function pickPresetJS(fs,d){
+  if(["vfat","exfat","ntfs","ntfs3","ntfs-3g"].includes(fs)) return "windows";
+  if(["nfs","nfs4"].includes(fs)) return "nfs";
+  if(fs==="cifs") return "cifs";
+  if(d&&d.rm) return "usb";
+  if(d&&!d.rota) return "ssd";
+  return "data";
+}
+const field=(label,control,hint,cls)=>el("div",{class:"contents"+(cls?" "+cls:"")},el("label",{},label),el("div",{},control,hint));
+function addDialog(pre){
+  const cands=S.devices.filter(d=>d.candidate&&!d.in_fstab);
+  const dev=el("select",{},cands.map(d=>el("option",{value:d.path,selected:!!pre&&pre.path===d.path},
+    `${d.path} – ${d.fstype} ${d.size}${d.label?` “${d.label}”`:""}`)),el("option",{value:"__net"},"Network share / other…"));
+  const net=el("input",{class:"mono",placeholder:"nas:/export  or  //server/share"});
+  const mp=el("input",{class:"mono",placeholder:"/mnt/data"});
+  const fst=el("input",{placeholder:"auto-detect"});
+  const preset=el("select",{},el("option",{value:""},"Auto – chosen for this disk (recommended)"),
+    Object.keys(S.presets).map(k=>el("option",{value:k},`${PRESET_LABEL[k]||k} (${k})`)));
+  const opts=el("input",{class:"mono",placeholder:"leave empty to use the preset"});
+  const phint=el("div",{class:"hint"});
+  const netRow=field("Network path",net,el("div",{class:"hint"},"NFS: server:/export     SMB: //server/share"),"hide");
+  function sync(){
+    const isNet=dev.value==="__net"; netRow.classList.toggle("hide",!isNet);
+    const d=cands.find(x=>x.path===dev.value);
+    if(!isNet&&d){ if(!mp.dataset.edited) mp.value="/mnt/"+slug(d.label||d.name); fst.placeholder=(d.fstype||"auto-detect")+" (detected)"; }
+    else { fst.placeholder="nfs4, cifs, …"; }
+    const fs=fst.value.trim()||(!isNet&&d&&d.fstype)||"";
+    const key=preset.value||pickPresetJS(fs,isNet?null:d), p=S.presets[key];
+    const optText=p[0].replace(/\{uid\}/g,"your user id").replace(/\{gid\}/g,"your group id");
+    phint.replaceChildren(preset.value?"":`Auto will use “${key}” for this disk. `,p[1]+" Options: ",el("code",{},optText));
+  }
+  mp.addEventListener("input",()=>{mp.dataset.edited="1";});
+  dev.addEventListener("change",()=>{ delete mp.dataset.edited; sync(); });
+  preset.addEventListener("change",sync); fst.addEventListener("input",sync); sync();
+  const go=btn("Preview…",()=>{
+    const device=dev.value==="__net"?net.value.trim():dev.value;
+    if(!device) return toast("Enter the network path",true);
+    if(dev.value==="__net"&&!fst.value.trim()) return toast("Network shares need a type (nfs4, cifs…)",true);
+    const args=["add",device]; if(mp.value.trim()) args.push(mp.value.trim());
+    if(fst.value.trim()) args.push("-t",fst.value.trim()); if(preset.value) args.push("-p",preset.value); if(opts.value.trim()) args.push("-o",opts.value.trim());
+    m.close(); runAction("Add to fstab",args);
+  },"primary");
+  const m=modal("Add a mount",el("div",{class:"form"},
+    field("Device",dev,el("div",{class:"hint"},"Formatted disks that aren’t in fstab yet. Choose “Network share” for NFS or SMB.")),
+    netRow,
+    field("Mount point",mp,el("div",{class:"hint"},"The folder where the disk will appear. It is created for you; the suggestion comes from the disk’s label.")),
+    field("Filesystem type",fst,el("div",{class:"hint"},"Detected from the disk, so you can usually leave this empty. Required for network shares (nfs4, cifs…).")),
+    field("Preset",preset,phint),
+    field("Custom options",opts,el("div",{class:"hint"},"Advanced. Replaces the preset. Comma-separated, for example ",el("code",{},"defaults,noatime,nofail"),"."))),
+    [btn("Cancel",()=>m.close()),go]);
+}
+function editDialog(e){
+  const target=String(e.n);
+  const opts=el("input",{class:"wide mono",value:e.options}), fst=el("input",{value:e.fstype}), pass=el("input",{type:"number",min:0,max:2,value:e.passno});
+  const chips=["nofail","noatime","ro","noauto","_netdev","x-systemd.automount"].map(o=>el("button",{class:"chip btnchip",type:"button",title:S.optHelp[o]||"",
+    onclick:()=>{ const c=opts.value.split(",").filter(Boolean),i=c.indexOf(o); if(i>=0)c.splice(i,1); else c.push(o); opts.value=c.join(",")||"defaults"; }},o));
+  const go=btn("Preview…",()=>{
+    const args=["set",target,"--expect",e.spec];
+    if(opts.value.trim()!==e.options) args.push("-o",opts.value.trim());
+    if(fst.value.trim()!==e.fstype) args.push("-t",fst.value.trim());
+    if(String(pass.value)!==String(e.passno)) args.push("--passno",String(pass.value));
+    if(args.length===4) return toast("No changes");
+    m.close(); runAction("Edit "+e.file,args);
+  },"primary");
+  const m=modal("Edit "+e.file,el("div",{class:"form"},
+    field("Options",opts,el("div",{class:"hint"},"Comma-separated mount options. Hover a chip below to see what it does.")),
+    field("Quick toggles",el("div",{},chips),el("div",{class:"hint"},"Click to add or remove an option. “nofail” keeps boot going if the disk is missing.")),
+    field("Filesystem type",fst,el("div",{class:"hint"},"Normally left unchanged.")),
+    field("fsck pass",pass,el("div",{class:"hint"},"0 = never check at boot, 1 = the root filesystem, 2 = check after root (ext2/3/4 only)."))),[btn("Cancel",()=>m.close()),go]);
+}
+// pathPicker puts a Browse… button (the system's folder picker) next to a path field.
+function pathPicker(input,title,startAt){
+  const b=btn("Browse…",async()=>{
+    if(!native()) return toast("Browsing needs the fstab Manager window",true);
+    try{ const p=await native().ChooseFolder(title,input.value.trim()||startAt||""); if(p){ input.value=p; input.dispatchEvent(new Event("input")); input.focus(); } }
+    catch(e){ toast(String(e),true); }
+  });
+  b.title="Choose a folder";
+  return el("div",{class:"pickrow"},input,b);
+}
+function newLinkDialog(){
+  const target=el("input",{class:"wide mono",placeholder:"/mnt/data/Music"}), name=el("input",{class:"wide mono",placeholder:"defaults to the folder’s name"});
+  target.addEventListener("input",()=>{ const base=target.value.trim().replace(/\/+$/,"").split("/").pop();
+    name.placeholder=base?"defaults to “"+base+"”":"defaults to the folder’s name"; });
+  const flags=[["--adopt","Move my existing folder to the target first, then link back"],["--mkdir-target","Create the target folder if it’s missing"],
+    ["--relative","Make a relative link"],["--force","Replace an existing link of that name"],["--allow-missing","Allow a link to a target that doesn’t exist yet"]]
+    .map(([f,t])=>({f,box:el("input",{type:"checkbox"}),t}));
+  const go=btn("Preview…",()=>{
+    if(!target.value.trim()) return toast("Enter a target",true);
+    const args=["link","add",target.value.trim()]; if(name.value.trim()) args.push(name.value.trim());
+    flags.forEach(x=>{ if(x.box.checked) args.push(x.f); });
+    m.close(); runAction("New link",args);
+  },"primary");
+  const m=modal("New home-folder link",el("div",{class:"form"},el("label",{},"Target"),pathPicker(target,"Choose the folder the link should point to"),el("label",{},"Link name in ~"),name,
+    el("label",{},"Options"),el("div",{},flags.map(x=>el("div",{},el("label",{class:"small"},x.box,x.t))))),[btn("Cancel",()=>m.close()),go]);
+}
+function repointDialog(l){
+  const t=el("input",{class:"wide mono",value:l.target}), am=el("input",{type:"checkbox"});
+  const go=btn("Preview…",()=>{ const a=["link","set",l.name,t.value.trim()]; if(am.checked) a.push("--allow-missing"); m.close(); runAction("Repoint ~/"+l.name,a); },"primary");
+  const m=modal("Repoint ~/"+l.name,el("div",{class:"form"},el("label",{},"New target"),pathPicker(t,"Choose the new folder for ~/"+l.name),el("label",{},"Options"),el("label",{class:"small"},am,"allow a missing target")),
+    [btn("Cancel",()=>m.close()),go]);
+}
+
+/* ---------- live disk detection ---------- */
+function alertBox(title,msg,actions,kind){
+  const box=el("div",{class:"alert "+(kind||"")},el("b",{},title),el("div",{class:"small"},msg),
+    el("div",{class:"row"},actions||[],btn("Dismiss",()=>box.remove())));
+  document.getElementById("alerts").append(box); return box;
+}
+const devLine=d=>[d.path,d.fstype||null,d.size,d.label?"“"+d.label+"”":null,d.model||null].filter(Boolean).join(" · ");
+function onDevices(ev){
+  const added=ev.added||[], removed=ev.removed||[];
+  const usable=added.filter(d=>d.candidate);
+  usable.forEach(d=>{
+    const mounted=d.mounts&&d.mounts.length?" (mounted at "+d.mounts.join(", ")+")":"";
+    if(d.in_fstab) alertBox("Known disk reconnected",devLine(d)+" is already in fstab"+mounted,[],"info");
+    else { const box=alertBox("New disk detected",devLine(d)+mounted,[btn("Add to fstab…",async()=>{
+      box.remove(); await load(); addDialog((S.devices||[]).find(x=>x.path===d.path)||d); },"primary")]); }
+  });
+  if(!usable.length) added.filter(d=>d.type==="disk").forEach(d=>
+    alertBox("New disk without a filesystem",[d.path,d.size,d.model].filter(Boolean).join(" · ")+". Format it first (for example with GNOME Disks), then it will show up here.",[],"info"));
+  removed.filter(d=>d.candidate).forEach(d=>toast("Disk removed: "+d.path+(d.in_fstab?" (still listed in fstab)":"")));
+  scheduleLoad();
+}
+let loadTimer; function scheduleLoad(){ clearTimeout(loadTimer); loadTimer=setTimeout(load,400); }
+function connectEvents(){
+  const chip=document.getElementById("watchchip");
+  if(!(window.runtime&&window.runtime.EventsOn)){ chip.textContent="○ disk watch off"; chip.className="pill off"; return; }
+  window.runtime.EventsOn("devices",ev=>{ if(ev&&ev.type==="devices") onDevices(ev); else scheduleLoad(); });
+  chip.textContent="● watching disks"; chip.className="pill ok";
+}
+
+/* ---------- shell ---------- */
+function render(){
+  document.getElementById("ver").textContent="v"+S.info.version;
+  document.querySelectorAll(".about .verline").forEach(e=>e.textContent="fstab Manager "+S.info.version);
+  document.getElementById("hostinfo").textContent=`${S.info.host} · ${S.info.distro} · ${S.info.fstab}`;
+  const pc=document.getElementById("privchip"), pm=S.info.priv;
+  pc.textContent=pm==="pkexec"?"changes ask for your password":pm==="sudo"?"changes use sudo":pm?"full access":"read-only";
+  pc.className="pill "+(pm?"ok":"warn");
+  const nav=document.getElementById("tabs"); nav.textContent="";
+  TABS.forEach(([id,label])=>nav.append(el("button",{class:id===tab?"on":"",onclick:()=>{tab=id;location.hash=id;render();}},label)));
+  const main=document.getElementById("main"); main.textContent="";
+  if(!pm) main.append(el("div",{class:"banner"},"Read-only: fstab Manager can't ask for administrator rights on this system. Install polkit (the package that provides ",el("code",{},"pkexec"),") and reopen the app, or make changes with ",el("code",{},"sudo fstabctl"),". Home links still work."));
+  main.append({overview:viewOverview,mounts:viewMounts,disks:viewDisks,links:viewLinks,backups:viewBackups,transfer:viewTransfer}[tab]());
+}
+document.getElementById("helpbtn").addEventListener("click",()=>showAbout(false));
+showAbout(true);
+document.getElementById("quit").addEventListener("click",()=>{ if(window.runtime&&window.runtime.Quit) window.runtime.Quit(); else window.close(); });
+load();
+// Wails adds its runtime just after the page loads; connect once it's there.
+(function waitRuntime(n){ if(window.runtime&&window.runtime.EventsOn||n>50) connectEvents(); else setTimeout(()=>waitRuntime(n+1),100); })(0);
+</script>
+</body></html>

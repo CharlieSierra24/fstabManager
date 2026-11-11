@@ -1,0 +1,1988 @@
+#!/usr/bin/env python3
+"""
+fstabctl - manage, back up, restore, and export /etc/fstab, plus the
+symlinks in your home folder that point at those disks.
+
+Single file, Python 3.8+, standard library only. Works on any systemd or
+non-systemd Linux distro that has util-linux (lsblk / findmnt).
+
+Typical use:
+    fstabctl gui                        # opens the desktop app, fstab Manager
+    fstabctl scan                       # what disks/partitions exist?
+    sudo fstabctl add                   # interactive wizard
+    sudo fstabctl add /dev/sdb1 /mnt/data --preset ssd
+    sudo fstabctl backup --note "before reinstall"
+    fstabctl report -o fstab-report.md  # human-readable report
+    fstabctl export -o fstab-bundle.json  # portable bundle for a new install
+    sudo fstabctl import fstab-bundle.json   # on the rebuilt system
+
+Home-folder symlinks (no sudo needed):
+    fstabctl link list                          # symlinks in ~ and whether they work
+    fstabctl link add /mnt/data/Music           # creates ~/Music -> /mnt/data/Music
+    fstabctl link add /mnt/data/Documents --adopt   # moves existing ~/Documents there, links back
+    fstabctl link check                         # find broken links (and why)
+    fstabctl link import fstab-bundle.json      # recreate your links after a rebuild
+
+Every change is validated, shown as a diff, and preceded by an automatic
+backup. Nothing is written without confirmation (or -y).
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import difflib
+import hashlib
+import json
+import os
+import platform
+import pwd
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, asdict
+from pathlib import Path
+
+VERSION = "0.6.1"
+FSTAB_PATH = Path("/etc/fstab")
+DISABLED_MARK = "#fstabctl-disabled#"
+SYSTEM_MOUNTS = {"/", "/boot", "/boot/efi", "/efi"}
+NON_FS = {"LVM2_member", "crypto_LUKS", "linux_raid_member", "zfs_member",
+          "ceph_bluestore", "BitLocker", "swap_placeholder"}
+BY_DIR = {"UUID": "by-uuid", "LABEL": "by-label", "PARTUUID": "by-partuuid",
+          "PARTLABEL": "by-partlabel", "ID": "by-id"}
+
+# name: (options template, description). {uid}/{gid} are filled in at use time.
+PRESETS = {
+    "data":    ("defaults,nofail",
+                "Generic internal disk (ext4/xfs/btrfs). Boot continues if it is missing."),
+    "ssd":     ("defaults,noatime,nofail",
+                "SSD/NVMe. noatime cuts writes. Prefer the fstrim.timer service over 'discard'."),
+    "usb":     ("defaults,noauto,nofail,x-systemd.automount,x-systemd.device-timeout=5,"
+                "x-systemd.idle-timeout=60",
+                "Removable/external drive. Mounts on first access, never blocks boot."),
+    "windows": ("defaults,nofail,uid={uid},gid={gid},dmask=022,fmask=133",
+                "NTFS/exFAT/FAT drive. Files owned by you; no execute bit on files."),
+    "nfs":     ("defaults,_netdev,nofail,x-systemd.automount,x-systemd.mount-timeout=10",
+                "NFS share. Waits for network, mounts on demand, never blocks boot."),
+    "cifs":    ("defaults,_netdev,nofail,x-systemd.automount,x-systemd.mount-timeout=10,"
+                "credentials=/etc/samba/credentials,uid={uid},gid={gid}",
+                "SMB/CIFS share. Put username/password in the credentials file (chmod 600)."),
+}
+
+OPT_HELP = {
+    "defaults": "rw, suid, dev, exec, auto, nouser, async",
+    "nofail": "boot continues if the device is absent",
+    "noauto": "not mounted at boot (mount manually or via automount)",
+    "auto": "mounted at boot / by 'mount -a'",
+    "ro": "read-only", "rw": "read-write",
+    "noatime": "do not update file access times (fewer writes)",
+    "relatime": "update access time only when older than modify time",
+    "nosuid": "ignore setuid/setgid bits", "nodev": "ignore device files",
+    "noexec": "forbid executing binaries", "user": "any user may mount it",
+    "users": "any user may mount and unmount it",
+    "discard": "continuous TRIM (consider fstrim.timer instead)",
+    "_netdev": "needs the network up before mounting",
+    "x-systemd.automount": "mount lazily on first access",
+    "sw": "swap space", "bind": "bind mount of another directory",
+}
+PREFIX_HELP = {
+    "uid=": "files appear owned by this user id", "gid=": "files appear owned by this group id",
+    "umask=": "permission mask for all files", "fmask=": "permission mask for files",
+    "dmask=": "permission mask for directories", "compress=": "transparent compression (btrfs)",
+    "subvol=": "mounts this btrfs subvolume", "subvolid=": "mounts this btrfs subvolume id",
+    "credentials=": "file holding network share username/password",
+    "x-systemd.device-timeout=": "how long systemd waits for the device",
+    "x-systemd.idle-timeout=": "unmount after this much idle time",
+    "x-systemd.mount-timeout=": "how long systemd waits for the mount",
+    "errors=": "action on filesystem error", "pri=": "swap priority",
+    "vers=": "network protocol version", "commit=": "journal commit interval (s)",
+    "size=": "maximum size", "mode=": "permissions of the mount root",
+}
+
+
+# ----------------------------------------------------------------- helpers --
+def run(cmd):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]}: not found")
+
+
+def die(msg, code=1):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def ask(prompt, default=None):
+    if not sys.stdin.isatty():
+        die(f"need input for '{prompt}' but stdin is not a terminal; pass it as an argument")
+    suffix = f" [{default}]" if default else ""
+    ans = input(f"{prompt}{suffix}: ").strip()
+    return ans or (default or "")
+
+
+def confirm(prompt, assume_yes=False):
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print("Not a terminal; re-run with -y to apply.", file=sys.stderr)
+        return False
+    return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+
+
+def invoker():
+    return os.environ.get("FSTABCTL_REAL_USER") or os.environ.get("SUDO_USER")
+
+
+def real_user():
+    name = invoker() or pwd.getpwuid(os.getuid()).pw_name
+    try:
+        return pwd.getpwnam(name)
+    except KeyError:
+        return pwd.getpwuid(os.getuid())
+
+
+def own(path):
+    """When running under sudo, hand backup files back to the invoking user."""
+    if os.geteuid() == 0 and invoker():
+        u = real_user()
+        try:
+            os.chown(path, u.pw_uid, u.pw_gid)
+        except OSError:
+            pass
+
+
+def backup_dir():
+    env = os.environ.get("FSTABCTL_BACKUP_DIR")
+    if env:
+        return Path(env)
+    return Path(real_user().pw_dir) / ".local/share/fstabctl/backups"
+
+
+def distro():
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return platform.system()
+
+
+def unescape(s):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def escape(s):
+    return (s.replace("\\", "\\134").replace(" ", "\\040")
+             .replace("\t", "\\011").replace("\n", "\\012"))
+
+
+def table(headers, rows, md=False):
+    rows = [[str(c) for c in r] for r in rows]
+    if md:
+        esc = lambda s: s.replace("|", "\\|")
+        out = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
+        out += ["| " + " | ".join(esc(c) for c in r) + " |" for r in rows]
+        return "\n".join(out)
+    widths = [max([len(h)] + [len(r[i]) for r in rows]) for i, h in enumerate(headers)]
+    fmt = "  ".join("{:<%d}" % w for w in widths)
+    out = [fmt.format(*headers).rstrip(), fmt.format(*("-" * w for w in widths)).rstrip()]
+    out += [fmt.format(*r).rstrip() for r in rows]
+    return "\n".join(out)
+
+
+# ------------------------------------------------------------ fstab model --
+@dataclass
+class Entry:
+    spec: str
+    file: str
+    fstype: str
+    options: str = "defaults"
+    dump: int = 0
+    passno: int = 0
+    enabled: bool = True
+
+    def line(self):
+        body = (f"{escape(self.spec):<42} {escape(self.file):<22} {self.fstype:<8} "
+                f"{self.options:<44} {self.dump} {self.passno}")
+        return body if self.enabled else f"{DISABLED_MARK} {body}"
+
+    def opts(self):
+        return [o for o in self.options.split(",") if o]
+
+    def has_opt(self, name):
+        return name in self.opts()
+
+
+def parse_line(raw):
+    """Return an Entry, None for blank/comment lines, or raise ValueError."""
+    s = raw.strip()
+    enabled = True
+    if s.startswith(DISABLED_MARK):
+        s = s[len(DISABLED_MARK):].strip()
+        enabled = False
+    elif not s or s.startswith("#"):
+        return None
+    parts = s.split()
+    if not 4 <= len(parts) <= 6:
+        raise ValueError(f"expected 4-6 fields, found {len(parts)}")
+    try:
+        dump = int(parts[4]) if len(parts) > 4 else 0
+        passno = int(parts[5]) if len(parts) > 5 else 0
+    except ValueError:
+        raise ValueError("dump/pass fields must be integers")
+    return Entry(unescape(trimq(parts[0])), unescape(trimq(parts[1])), trimq(parts[2]), trimq(parts[3]),
+                 dump, passno, enabled)
+
+
+def trimq(s):
+    """Remove quotes around a value, as in UUID="abcd-1234" or a bare "value"."""
+    key, eq, val = s.partition("=")
+    if eq and key and len(val) >= 2 and val[0] in "\"'" and val[-1] == val[0]:
+        return key + "=" + val[1:-1]
+    if not eq and len(s) >= 2 and s[0] in "\"'" and s[-1] == s[0]:
+        return s[1:-1]
+    return s
+
+
+class Fstab:
+    def __init__(self, text):
+        self.lines = text.splitlines()
+
+    def entries(self):
+        out = []
+        for i, raw in enumerate(self.lines):
+            try:
+                e = parse_line(raw)
+            except ValueError:
+                continue
+            if e:
+                out.append((i, e))
+        return out
+
+    def problems(self):
+        errs = []
+        for i, raw in enumerate(self.lines, 1):
+            try:
+                parse_line(raw)
+            except ValueError as ex:
+                errs.append(f"line {i}: {ex}: {raw.strip()}")
+        return errs
+
+    def text(self):
+        return "\n".join(self.lines) + "\n"
+
+    def append(self, entry):
+        if self.lines and self.lines[-1].strip():
+            pass
+        self.lines.append(entry.line())
+
+    def replace(self, idx, entry):
+        self.lines[idx] = entry.line()
+
+    def remove(self, idx):
+        del self.lines[idx]
+
+
+def read_fstab():
+    try:
+        return FSTAB_PATH.read_text()
+    except FileNotFoundError:
+        return ""
+    except PermissionError:
+        die(f"cannot read {FSTAB_PATH}")
+
+
+def validate(text):
+    fs = Fstab(text)
+    errors = fs.problems()
+    seen = {}
+    for _, e in fs.entries():
+        if not e.enabled:
+            continue
+        if not e.file.startswith("/") and e.file not in ("none", "swap"):
+            errors.append(f"{e.spec}: mount point '{e.file}' must be an absolute path")
+        if e.fstype != "swap" and e.file != "none":
+            if e.file in seen:
+                errors.append(f"duplicate mount point {e.file} ({seen[e.file]} and {e.spec})")
+            seen[e.file] = e.spec
+    return errors
+
+
+# ------------------------------------------------------ devices & status --
+def resolve(spec):
+    """Return real device path, 'network', 'pseudo', or None if missing."""
+    m = re.match(r"^(UUID|LABEL|PARTUUID|PARTLABEL|ID)=(.*)$", spec)
+    if m:
+        base = Path("/dev/disk") / BY_DIR[m.group(1)]
+        for cand in (m.group(2), m.group(2).upper(), m.group(2).lower(),
+                     m.group(2).replace(" ", "\\x20")):
+            p = base / cand
+            if p.exists():
+                return os.path.realpath(p)
+        return None
+    if spec.startswith("//") or (":" in spec and not spec.startswith("/")):
+        return "network"
+    if spec.startswith("/dev/"):
+        return os.path.realpath(spec) if os.path.exists(spec) else None
+    if spec.startswith("/"):
+        return spec if os.path.exists(spec) else None
+    return "pseudo"
+
+
+def mounted_points():
+    pts = set()
+    try:
+        for line in Path("/proc/self/mounts").read_text().splitlines():
+            f = line.split()
+            if len(f) > 1:
+                pts.add(unescape(f[1]))
+    except OSError:
+        pass
+    return pts
+
+
+def swap_devices():
+    out = set()
+    try:
+        for line in Path("/proc/swaps").read_text().splitlines()[1:]:
+            out.add(os.path.realpath(line.split()[0]))
+    except OSError:
+        pass
+    return out
+
+
+def status_of(e, mounted, swaps):
+    if not e.enabled:
+        return "disabled"
+    r = resolve(e.spec)
+    if r is None:
+        return "device missing"
+    if e.fstype == "swap":
+        return "active" if r in swaps else "inactive"
+    return "mounted" if e.file in mounted else "not mounted"
+
+
+def lsblk():
+    base = "NAME,PATH,TYPE,SIZE,FSTYPE,LABEL,UUID,PARTUUID,MODEL,ROTA,RM"
+    r = None
+    for mp in ("MOUNTPOINTS", "MOUNTPOINT"):
+        r = run(["lsblk", "-J", "-o", f"{base},{mp}"])
+        if r.returncode == 0 and r.stdout:
+            break
+    else:
+        return []
+    out = []
+
+    def truthy(v):
+        return str(v).lower() in ("1", "true")
+
+    def walk(nodes, model=None):
+        for n in nodes:
+            if n.get("type") in ("loop", "rom") or str(n.get("name", "")).startswith("zram"):
+                continue
+            mps = n.get("mountpoints")
+            if mps is None:
+                mps = [n.get("mountpoint")]
+            m = n.get("model") or model
+            out.append(dict(
+                path=n.get("path") or "/dev/" + n.get("name", ""), name=n.get("name", ""),
+                type=n.get("type", ""), size=n.get("size") or "", fstype=n.get("fstype"),
+                label=n.get("label"), uuid=n.get("uuid"), partuuid=n.get("partuuid"),
+                model=(m or "").strip(), rota=truthy(n.get("rota")), rm=truthy(n.get("rm")),
+                mounts=[x for x in mps if x]))
+            walk(n.get("children") or [], m)
+
+    try:
+        walk(json.loads(r.stdout).get("blockdevices", []))
+    except ValueError:
+        return []
+    return out
+
+
+def is_candidate(d):
+    return bool(d["fstype"]) and d["fstype"] not in NON_FS
+
+
+def in_fstab(d, entries):
+    real = os.path.realpath(d["path"])
+    return any(e.enabled and resolve(e.spec) == real for _, e in entries)
+
+
+# ----------------------------------------------------------- backups -------
+def sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _id_key(path):
+    """Sort key so same-second snapshots ('...-2') order after the first."""
+    stem = Path(path).stem.split("-", 1)[1]
+    parts = stem.split("-")
+    return (parts[0] + "-" + parts[1], int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1)
+
+
+def list_backups():
+    d = backup_dir()
+    out = []
+    if d.is_dir():
+        for meta in sorted(d.glob("fstab-*.json"), key=_id_key, reverse=True):
+            try:
+                m = json.loads(meta.read_text())
+                m["file"] = str(meta.with_suffix(".bak"))
+                out.append(m)
+            except (OSError, ValueError):
+                continue
+    return out
+
+
+def make_backup(note="", dedupe=False):
+    text = read_fstab()
+    h = sha(text)
+    if dedupe:
+        existing = list_backups()
+        if existing and existing[0].get("sha256") == h:
+            return existing[0]
+    d = backup_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    own(d)
+    now = dt.datetime.now()
+    bid = now.strftime("%Y%m%d-%H%M%S")
+    n = 1
+    while (d / f"fstab-{bid}.bak").exists():
+        n += 1
+        bid = now.strftime("%Y%m%d-%H%M%S") + f"-{n}"
+    bak = d / f"fstab-{bid}.bak"
+    bak.write_text(text)
+    meta = dict(id=bid, created=now.isoformat(timespec="seconds"), host=socket.gethostname(),
+                distro=distro(), note=note, sha256=h, entries=len(Fstab(text).entries()))
+    mp = d / f"fstab-{bid}.json"
+    mp.write_text(json.dumps(meta, indent=2))
+    own(bak)
+    own(mp)
+    meta["file"] = str(bak)
+    return meta
+
+
+def find_backup(ref):
+    backups = list_backups()
+    if ref in (None, "latest"):
+        if not backups:
+            die(f"no backups found in {backup_dir()}")
+        return backups[0]
+    for b in backups:
+        if b["id"] == ref or b["id"].startswith(ref):
+            return b
+    p = Path(ref)
+    if p.is_file():
+        return {"id": p.name, "file": str(p), "note": "external file"}
+    die(f"no backup matching '{ref}' (try: fstabctl backups)")
+
+
+# ------------------------------------------------------------ writing ------
+def atomic_write(path, text):
+    st = path.stat() if path.exists() else None
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".fstabctl-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if st:
+            os.chmod(tmp, st.st_mode & 0o7777)
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError:
+                pass
+        else:
+            os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    if shutil.which("restorecon"):
+        run(["restorecon", str(path)])
+
+
+def show_diff(old, new, a="current", b="proposed"):
+    d = list(difflib.unified_diff(old.splitlines(), new.splitlines(), a, b, lineterm=""))
+    print("\n".join(d) if d else "(no changes)")
+    return bool(d)
+
+
+def write_fstab(new_text, note, args, post=None):
+    """Validate -> diff -> confirm -> backup -> atomic write. Returns True if written."""
+    old = read_fstab()
+    if not new_text.endswith("\n"):
+        new_text += "\n"
+    if old == new_text:
+        print("Nothing to change.")
+        return False
+    # Only block on problems this change introduces; pre-existing ones are left alone.
+    pre_existing = set(validate(old))
+    errors = [e for e in validate(new_text) if e not in pre_existing]
+    if errors:
+        print("Refusing to write; problems found:", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        sys.exit(2)
+    show_diff(old, new_text)
+    if shutil.which("findmnt"):
+        with tempfile.NamedTemporaryFile("w", suffix=".fstab", delete=False) as t:
+            t.write(new_text)
+        r = run(["findmnt", "--verify", "--tab-file", t.name])
+        os.unlink(t.name)
+        notes = [l for l in (r.stdout + r.stderr).splitlines() if "[E]" in l or "[W]" in l]
+        if notes:
+            print("\nfindmnt --verify says (advisory):")
+            for l in notes:
+                print("  " + l.strip())
+    if args.dry_run:
+        print("\n(dry run: nothing written)")
+        return False
+    if not os.access(FSTAB_PATH if FSTAB_PATH.exists() else FSTAB_PATH.parent, os.W_OK):
+        die(f"no permission to write {FSTAB_PATH}; re-run with sudo")
+    if not confirm("\nApply this change?", args.yes):
+        print("Cancelled.")
+        return False
+    b = make_backup(note=f"auto: before {note}", dedupe=True)
+    atomic_write(FSTAB_PATH, new_text)
+    print(f"\nWritten. Previous version saved as backup {b['id']}.")
+    if post:
+        post()
+    print("Next: 'sudo systemctl daemon-reload' (systemd distros), then 'sudo mount -a' to test.")
+    print(f"Undo any time with: fstabctl restore {b['id']}")
+    return True
+
+
+# ---------------------------------------------------------- target lookup --
+def find_expected(fs, args):
+    """find_target, plus --expect SPEC: refuse if that entry's device changed since it was shown."""
+    idx, e = find_target(fs, args.target)
+    if getattr(args, "expect", None) and e.spec != args.expect:
+        die(f"fstab has changed since this was shown (entry {args.target} is now {e.spec}); refresh and try again")
+    return idx, e
+
+
+def find_target(fs, target):
+    ents = fs.entries()
+    if target.isdigit() and 1 <= int(target) <= len(ents):
+        return ents[int(target) - 1]
+    hits = [(i, e) for i, e in ents if e.file == target or e.spec == target]
+    if not hits:
+        die(f"no entry matches '{target}' (use a mount point, device spec, or # from 'list')")
+    if len(hits) > 1:
+        die(f"'{target}' matches several entries; use the # from 'fstabctl list'")
+    return hits[0]
+
+
+# ------------------------------------------------------------ commands -----
+def cmd_list(args):
+    fs = Fstab(read_fstab())
+    mounted, swaps = mounted_points(), swap_devices()
+    rows = [(n, status_of(e, mounted, swaps), e.spec, e.file, e.fstype, e.options)
+            for n, (_, e) in enumerate(fs.entries(), 1)]
+    if not rows:
+        print(f"No entries in {FSTAB_PATH}.")
+    else:
+        print(table(["#", "STATUS", "DEVICE", "MOUNT POINT", "TYPE", "OPTIONS"], rows))
+    for p in fs.problems():
+        print(f"warning: {p}", file=sys.stderr)
+
+
+def cmd_scan(args):
+    devs = lsblk()
+    if not devs:
+        die("lsblk not available or returned nothing")
+    ents = Fstab(read_fstab()).entries()
+    rows = []
+    for d in devs:
+        rows.append((d["path"], d["size"], d["type"], d["fstype"] or "", d["label"] or "",
+                     d["uuid"] or "", ",".join(d["mounts"]),
+                     ("yes" if in_fstab(d, ents) else "no") if is_candidate(d) else "-"))
+    print(table(["DEVICE", "SIZE", "TYPE", "FS", "LABEL", "UUID", "MOUNTED AT", "IN FSTAB"], rows))
+    free = [d for d in devs if is_candidate(d) and not d["mounts"] and not in_fstab(d, ents)]
+    if free:
+        print("\nFormatted but not mounted or in fstab (candidates for 'fstabctl add'):")
+        for d in free:
+            print(f"  {d['path']}  {d['fstype']}  {d['size']}  {d['label'] or ''}")
+
+
+def pick_preset(fstype, dev):
+    if fstype in ("vfat", "exfat", "ntfs", "ntfs3", "ntfs-3g"):
+        return "windows"
+    if fstype in ("nfs", "nfs4"):
+        return "nfs"
+    if fstype == "cifs":
+        return "cifs"
+    if dev and dev["rm"]:
+        return "usb"
+    if dev and not dev["rota"]:
+        return "ssd"
+    return "data"
+
+
+def cmd_add(args):
+    devs = lsblk()
+    fs = Fstab(read_fstab())
+    ents = fs.entries()
+    wizard = args.device is None
+    dev = None
+    if wizard:
+        cands = [d for d in devs if is_candidate(d) and not in_fstab(d, ents)]
+        if not cands:
+            die("no unconfigured filesystems found; pass a device/network path explicitly")
+        print("Unconfigured filesystems:")
+        for i, d in enumerate(cands, 1):
+            print(f"  {i}) {d['path']:<16} {d['fstype']:<8} {d['size']:>7}  "
+                  f"{d['label'] or '-':<14} {d['model']}")
+        choice = ask("Pick a number")
+        if not choice.isdigit() or not 1 <= int(choice) <= len(cands):
+            die("invalid choice")
+        dev = cands[int(choice) - 1]
+        device_arg = dev["path"]
+    else:
+        device_arg = args.device
+
+    spec, fstype = device_arg, args.fstype
+    if re.match(r"^(UUID|LABEL|PARTUUID|PARTLABEL|ID)=", device_arg):
+        spec = device_arg
+        if not fstype:
+            real = resolve(spec)
+            for d in devs:
+                if real and os.path.realpath(d["path"]) == real:
+                    dev, fstype = d, d["fstype"]
+                    break
+        if not fstype:
+            die(f"could not detect the filesystem for {spec}; pass the type with -t")
+    elif device_arg.startswith("//") or (":" in device_arg and not device_arg.startswith("/")):
+        if not fstype:
+            die("network shares need -t/--fstype (e.g. nfs, nfs4, cifs)")
+    else:
+        if dev is None:
+            real = os.path.realpath(device_arg)
+            for d in devs:
+                if real == os.path.realpath(d["path"]) or device_arg in (d["name"], d["uuid"], d["label"]):
+                    dev = d
+                    break
+        if dev is None:
+            die(f"'{device_arg}' is not a known block device (see: fstabctl scan)")
+        ident = {"uuid": ("UUID", dev["uuid"]), "label": ("LABEL", dev["label"]),
+                 "partuuid": ("PARTUUID", dev["partuuid"]),
+                 "path": (None, dev["path"])}[args.by]
+        if ident[0] and ident[1]:
+            spec = f"{ident[0]}={ident[1]}"
+        elif ident[0]:
+            fallback = f"UUID={dev['uuid']}" if dev["uuid"] else dev["path"]
+            print(f"note: device has no {args.by}; using {fallback}")
+            spec = fallback
+        else:
+            spec = dev["path"]
+            print("note: /dev/sdX names can change between boots; UUID is safer.")
+        fstype = fstype or dev["fstype"]
+        if not fstype:
+            die("could not detect a filesystem; format it first or pass -t")
+
+    if fstype == "ntfs":
+        fstype = "ntfs3" if "ntfs3" in Path("/proc/filesystems").read_text() else "ntfs-3g"
+
+    # mount point
+    if fstype == "swap":
+        mountpoint = "none"
+    else:
+        default_mp = "/mnt/" + re.sub(r"[^A-Za-z0-9._-]+", "-",
+                                      (dev and (dev["label"] or dev["name"])) or "share").strip("-")
+        mountpoint = args.mountpoint or (ask("Mount point", default_mp) if wizard else default_mp)
+    if mountpoint != "none" and not mountpoint.startswith("/"):
+        die("mount point must be an absolute path")
+
+    # options
+    preset = args.preset or pick_preset(fstype, dev)
+    if wizard and not args.preset and not args.options:
+        print("Presets: " + ", ".join(PRESETS))
+        preset = ask("Preset", preset)
+    if preset not in PRESETS:
+        die(f"unknown preset '{preset}' (see: fstabctl presets)")
+    u = real_user()
+    options = args.options or PRESETS[preset][0].format(uid=u.pw_uid, gid=u.pw_gid)
+    if fstype == "swap":
+        options = args.options or "sw"
+    passno = args.passno if args.passno is not None else (
+        2 if fstype in ("ext2", "ext3", "ext4") and mountpoint != "/" else 0)
+
+    entry = Entry(spec, mountpoint, fstype, options, args.dump, 0 if fstype == "swap" else passno)
+    for _, e in ents:
+        if e.enabled and mountpoint != "none" and e.file == mountpoint:
+            die(f"{mountpoint} is already in fstab ({e.spec}); use 'set' to change it")
+        if e.enabled and e.spec == spec and fstype != "swap":
+            print(f"warning: {spec} already appears in fstab at {e.file}", file=sys.stderr)
+    print(f"\nNew entry ({'preset: ' + preset if not args.options else 'custom options'}):")
+    print("  " + entry.line() + "\n")
+    fs.append(entry)
+
+    def post():
+        if mountpoint != "none" and not args.no_mkdir and not os.path.isdir(mountpoint):
+            os.makedirs(mountpoint, exist_ok=True)
+            print(f"Created mount point {mountpoint}")
+
+    write_fstab(fs.text(), f"add {mountpoint}", args, post)
+
+
+def cmd_remove(args):
+    fs = Fstab(read_fstab())
+    idx, e = find_expected(fs, args)
+    if e.file in SYSTEM_MOUNTS and not args.force:
+        die(f"{e.file} is a boot-critical mount; use --force if you really mean it")
+    fs.remove(idx)
+    write_fstab(fs.text(), f"remove {e.file}", args)
+
+
+def _toggle(args, enable):
+    fs = Fstab(read_fstab())
+    idx, e = find_expected(fs, args)
+    if e.enabled == enable:
+        die(f"{e.file} is already {'enabled' if enable else 'disabled'}")
+    if not enable and e.file in SYSTEM_MOUNTS and not args.force:
+        die(f"{e.file} is boot-critical; use --force to disable it")
+    e.enabled = enable
+    fs.replace(idx, e)
+    write_fstab(fs.text(), f"{'enable' if enable else 'disable'} {e.file}", args)
+
+
+def cmd_enable(args):
+    _toggle(args, True)
+
+
+def cmd_disable(args):
+    _toggle(args, False)
+
+
+def cmd_set(args):
+    fs = Fstab(read_fstab())
+    idx, e = find_expected(fs, args)
+    if args.options is not None:
+        e.options = args.options
+    if args.add_options:
+        cur = e.opts()
+        for o in args.add_options.split(","):
+            if o and o not in cur:
+                cur.append(o)
+        e.options = ",".join(cur)
+    if args.remove_options:
+        drop = set(args.remove_options.split(","))
+        e.options = ",".join(o for o in e.opts() if o not in drop) or "defaults"
+    if args.fstype:
+        e.fstype = args.fstype
+    if args.device:
+        e.spec = args.device
+    if args.mountpoint:
+        e.file = args.mountpoint
+    if args.passno is not None:
+        e.passno = args.passno
+    fs.replace(idx, e)
+    write_fstab(fs.text(), f"edit {e.file}", args)
+
+
+KNOWN_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "exfat", "ntfs", "ntfs3", "ntfs-3g", "f2fs", "nfs",
+            "nfs4", "cifs", "swap", "tmpfs", "zfs", "jfs", "reiserfs", "hfsplus"}
+
+
+def cmd_mount(args):
+    """Mount one entry, or with --all every entry that should be mounted but isn't (no reboot needed)."""
+    if bool(args.all) == bool(args.target):
+        die("mount needs one target, or --all")
+    fs = Fstab(read_fstab())
+    cands = fs.entries() if args.all else [find_expected(fs, args)]
+    mounted = mounted_points()
+    plan, skipped = [], []
+    for _, e in cands:
+        reason = ""
+        if not e.enabled:
+            reason = "disabled"
+        elif e.fstype == "swap" or e.file in ("none", "swap"):
+            reason = "swap, not a folder"
+        elif e.file in mounted:
+            reason = "already mounted"
+        elif e.file in SYSTEM_MOUNTS:
+            reason = "boot-critical; the system mounts it"
+        elif args.all and (e.has_opt("noauto") or e.has_opt("x-systemd.automount")):
+            reason = "mounts by itself when you open the folder"
+        elif resolve(e.spec) is None:
+            reason = "disk not connected"
+        if reason:
+            if not args.all:
+                die(f"can't mount {e.file}: {reason}")
+            skipped.append((e.file, reason))
+        else:
+            plan.append(e)
+    if not plan:
+        print("Nothing to do: every entry that should be mounted already is.")
+        for f, r in skipped:
+            print(f"  skipped {f} ({r})")
+        return
+    print("Will mount:")
+    for e in plan:
+        print(f"  {e.file}  ({e.spec}, {e.fstype})")
+    if skipped:
+        print("Skipping:")
+        for f, r in skipped:
+            print(f"  {f}  ({r})")
+    if args.dry_run:
+        print("\n(dry run: nothing mounted)")
+        return
+    if os.geteuid() != 0:
+        die("mounting needs administrator rights; re-run with sudo")
+    if not confirm("\nMount now?", args.yes):
+        print("Cancelled.")
+        return
+    if shutil.which("systemctl") and os.path.isdir("/run/systemd/system"):
+        run(["systemctl", "daemon-reload"])  # so systemd's mount units match the current fstab
+    print()
+    failed = 0
+    for e in plan:
+        os.makedirs(e.file, exist_ok=True)
+        cmd = ["mount", e.file] if str(FSTAB_PATH) == "/etc/fstab" else ["mount", "--fstab", str(FSTAB_PATH), e.file]
+        r = run(cmd)
+        if r.returncode != 0:
+            failed += 1
+            print(f"✗ {e.file}: {(r.stderr + ' ' + r.stdout).strip() or 'mount failed'}")
+        else:
+            print(f"✓ mounted {e.file}")
+    if failed:
+        die(f"{failed} of {len(plan)} mounts failed")
+
+
+def cmd_repair(args):
+    """Fix a line that can't be read: comment it out, or complete a 3-field line with standard options."""
+    line_no = args.comment_out or args.add_defaults
+    fs = Fstab(read_fstab())
+    if not 1 <= line_no <= len(fs.lines):
+        die(f"no line {line_no} in {FSTAB_PATH}")
+    line = fs.lines[line_no - 1].strip()
+    if args.expect and line != args.expect:
+        die(f"fstab has changed since this was shown (line {line_no} is now: {line}); refresh and try again")
+    try:
+        parse_line(line)
+        die(f"line {line_no} isn't broken; nothing to repair")
+    except ValueError:
+        pass
+    if args.comment_out:
+        fs.lines[line_no - 1] = f"# {line}    # commented out by fstabctl: this line could not be read"
+    else:
+        p = line.split()
+        if len(p) != 3 or p[2] not in KNOWN_FS:
+            die(f"line {line_no} can't be completed automatically; comment it out instead")
+        opts = "defaults"
+        if unescape(p[1]) not in SYSTEM_MOUNTS and p[2] != "swap":
+            opts += ",nofail"
+        if p[2] in ("nfs", "nfs4", "cifs"):
+            opts += ",_netdev"
+        fs.lines[line_no - 1] = " ".join(p) + f" {opts} 0 0"
+    write_fstab(fs.text(), f"repair line {line_no}", args)
+
+
+def cmd_backup(args):
+    b = make_backup(note=args.note or "manual")
+    print(f"Backup {b['id']} saved to {b['file']}")
+
+
+def cmd_backups(args):
+    bs = list_backups()
+    if not bs:
+        print(f"No backups in {backup_dir()}")
+        return
+    print(table(["ID", "CREATED", "HOST", "ENTRIES", "NOTE"],
+                [(b["id"], b["created"], b.get("host", ""), b.get("entries", ""), b.get("note", ""))
+                 for b in bs]))
+    print(f"\nLocation: {backup_dir()}")
+
+
+def cmd_diff(args):
+    b = find_backup(args.backup)
+    show_diff(Path(b["file"]).read_text(), read_fstab(), f"backup {b['id']}", "current")
+
+
+def cmd_restore(args):
+    b = find_backup(args.backup)
+    text = Path(b["file"]).read_text()
+    print(f"Restoring backup {b['id']} ({b.get('note', '')})\n")
+    write_fstab(text, f"restore of {b['id']}", args)
+
+
+def cmd_verify(args):
+    text = read_fstab()
+    errs = validate(text)
+    for e in errs:
+        print(f"[ERROR] {e}")
+    ents = Fstab(text).entries()
+    for lvl, msg in analyze([e for _, e in ents]):
+        print(f"[{lvl.upper()}] {msg}")
+    if shutil.which("findmnt"):
+        r = run(["findmnt", "--verify", "--tab-file", str(FSTAB_PATH)])
+        print("\nfindmnt --verify:\n" + (r.stdout + r.stderr).strip())
+    sys.exit(1 if errs else 0)
+
+
+def analyze(entries):
+    warns = []
+    for e in entries:
+        if not e.enabled:
+            continue
+        r = resolve(e.spec)
+        local = r not in ("network", "pseudo") and e.fstype != "swap"
+        if r is None and not (e.has_opt("nofail") or e.has_opt("noauto")):
+            warns.append(("warn", f"{e.file}: device {e.spec} is not present and the entry has no "
+                                  "'nofail'; boot may stall or drop to an emergency shell"))
+        elif r is None:
+            warns.append(("info", f"{e.file}: device {e.spec} is not currently present"))
+        if r == "network" and not (e.has_opt("_netdev") or e.has_opt("x-systemd.automount")):
+            warns.append(("warn", f"{e.file}: network mount without '_netdev'; it may try to mount "
+                                  "before the network is up"))
+        if local and e.file not in SYSTEM_MOUNTS and not e.has_opt("nofail") and not e.has_opt("noauto") \
+                and e.fstype != "tmpfs":
+            warns.append(("info", f"{e.file}: consider adding 'nofail' so a missing disk can't block boot"))
+        if e.has_opt("discard"):
+            warns.append(("info", f"{e.file}: 'discard' is continuous TRIM; periodic fstrim.timer is "
+                                  "usually preferred"))
+        for o in e.opts():
+            if o.startswith("credentials="):
+                p = o.split("=", 1)[1]
+                try:
+                    if os.stat(p).st_mode & 0o077:
+                        warns.append(("warn", f"{e.file}: credentials file {p} is readable by others "
+                                              "(chmod 600 it)"))
+                except OSError:
+                    warns.append(("warn", f"{e.file}: credentials file {p} does not exist"))
+        if re.match(r"^/dev/(sd|vd|hd|nvme)", e.spec) and e.file not in ("none",):
+            warns.append(("info", f"{e.file}: {e.spec} uses a kernel device name which can change "
+                                  "between boots; UUID= is more robust"))
+    return warns
+
+
+def explain(opt):
+    if opt in OPT_HELP:
+        return OPT_HELP[opt]
+    for p, t in PREFIX_HELP.items():
+        if opt.startswith(p):
+            return t + f" ({opt[len(p):]})"
+    return ""
+
+
+def build_report(fmt, args):
+    md = fmt == "markdown"
+    fs = Fstab(read_fstab())
+    ents = fs.entries()
+    mounted, swaps = mounted_points(), swap_devices()
+    devs = lsblk()
+    out = []
+
+    def h(title, level=2):
+        if md:
+            out.extend(["#" * level + " " + title, ""])
+        else:
+            out.extend([title, ("=" if level == 1 else "-") * len(title), ""])
+
+    h(f"fstab report for {socket.gethostname()}", 1)
+    meta = [("Generated", dt.datetime.now().strftime("%Y-%m-%d %H:%M")),
+            ("Distribution", distro()), ("Kernel", platform.release()),
+            ("fstab file", str(FSTAB_PATH)), ("Tool", f"fstabctl {VERSION}")]
+    out.extend((f"- **{k}:** {v}" if md else f"{k:<13}: {v}") for k, v in meta)
+    out.append("")
+
+    statuses = [status_of(e, mounted, swaps) for _, e in ents]
+    h("Summary")
+    out.append(f"{len(ents)} entries: {sum(1 for _, e in ents if e.enabled)} enabled, "
+               f"{sum(1 for _, e in ents if not e.enabled)} disabled; "
+               f"{sum(1 for s in statuses if s in ('mounted', 'active'))} currently mounted/active; "
+               f"{sum(1 for s in statuses if s == 'device missing')} with a missing device.")
+    out.append("")
+
+    h("Configured mounts")
+    rows = []
+    for n, ((_, e), st) in enumerate(zip(ents, statuses), 1):
+        r = resolve(e.spec)
+        rows.append((n, st, e.spec, r if r and r not in ("network", "pseudo") else (r or "-"),
+                     e.file, e.fstype, e.options, f"{e.dump}/{e.passno}"))
+    out.append(table(["#", "Status", "Device", "Resolves to", "Mount point", "Type", "Options", "Dump/Pass"],
+                     rows, md))
+    out.append("")
+
+    h("What each entry does")
+    for n, (_, e) in enumerate(ents, 1):
+        state = "" if e.enabled else " (DISABLED)"
+        out.append(f"{n}. {e.file}{state}: {e.fstype} filesystem on {e.spec}")
+        for o in e.opts():
+            ex = explain(o)
+            out.append(f"     - {o}" + (f": {ex}" if ex else ""))
+        if e.passno:
+            out.append(f"     - fsck order {e.passno} at boot")
+    out.append("")
+
+    warns = analyze([e for _, e in ents])
+    h("Findings")
+    if warns:
+        out.extend(f"- [{lvl.upper()}] {msg}" for lvl, msg in warns)
+    else:
+        out.append("No problems found.")
+    out.append("")
+
+    home = home_dir(args)
+    links = current_links(home, args.hidden, args.depth, ents, mounted)
+    if links:
+        h(f"Symlinks in {home}")
+        out.append(table(["Link", "Target", "Status", "Note"],
+                         [(l["name"], l["target"], "ok" if l["ok"] else "BROKEN", l["note"])
+                          for l in links], md))
+        out.append("")
+
+    if devs:
+        h("Block devices")
+        rows = [(d["path"], d["size"], d["type"], d["fstype"] or "", d["label"] or "", d["uuid"] or "",
+                 ",".join(d["mounts"]),
+                 ("yes" if in_fstab(d, ents) else "no") if is_candidate(d) else "-") for d in devs]
+        out.append(table(["Device", "Size", "Type", "FS", "Label", "UUID", "Mounted at", "In fstab"],
+                         rows, md))
+        out.append("")
+        free = [d for d in devs if is_candidate(d) and not d["mounts"] and not in_fstab(d, ents)]
+        if free:
+            h("Formatted devices not in fstab")
+            out.extend(f"- {d['path']} ({d['fstype']}, {d['size']}, label: {d['label'] or '-'})"
+                       for d in free)
+            out.append("")
+
+    h("Raw fstab")
+    raw = fs.text().rstrip("\n").splitlines()
+    out.extend(["```"] + raw + ["```"] if md else ["    " + l for l in raw])
+    out.append("")
+    return "\n".join(out)
+
+
+def emit(text, path):
+    if path:
+        Path(path).write_text(text if text.endswith("\n") else text + "\n")
+        own(path)
+        print(f"Wrote {path}")
+    else:
+        print(text)
+
+
+def cmd_report(args):
+    fmt = args.format
+    if not fmt:
+        fmt = "markdown" if (args.output or "").endswith((".md", ".markdown")) else "text"
+    emit(build_report(fmt, args), args.output)
+
+
+def build_bundle(args):
+    fs = Fstab(read_fstab())
+    devs = lsblk()
+    bundle = dict(
+        tool="fstabctl", version=VERSION, exported=dt.datetime.now().isoformat(timespec="seconds"),
+        host=socket.gethostname(), distro=distro(), kernel=platform.release(),
+        entries=[asdict(e) for _, e in fs.entries()],
+        devices=[{k: d[k] for k in ("path", "size", "fstype", "label", "uuid", "partuuid", "model")}
+                 for d in devs if d["fstype"]],
+        home=home_dir(args),
+        links=[{"name": l["name"], "target": l["target"]} for l in managed_links(home_dir(args))],
+        raw_fstab=fs.text())
+    st = load_settings(home_dir(args))
+    bundle["key_folders"], bundle["tracked_links"] = st["key_folders"], st["tracked_links"]
+    return bundle
+
+
+def cmd_export(args):
+    emit(json.dumps(build_bundle(args), indent=2), args.output)
+
+
+def cmd_import(args):
+    try:
+        bundle = json.loads(Path(args.bundle).read_text())
+    except (OSError, ValueError) as ex:
+        die(f"cannot read bundle: {ex}")
+    if bundle.get("tool") != "fstabctl":
+        die("not an fstabctl bundle (create one with: fstabctl export)")
+    fs = Fstab(read_fstab())
+    cur = [e for _, e in fs.entries()]
+    cur_mps = {e.file for e in cur if e.enabled}
+    cur_specs = {e.spec for e in cur}
+    devs = lsblk()
+    old_by_uuid = {d["uuid"]: d for d in bundle.get("devices", []) if d.get("uuid")}
+    plan, to_add, mkdirs = [], [], []
+
+    for raw in bundle.get("entries", []):
+        e = Entry(**{k: raw[k] for k in Entry.__dataclass_fields__ if k in raw})
+        why = None
+        if e.file in SYSTEM_MOUNTS and not args.include_system:
+            plan.append(("skip", e, "system mount (use --include-system to import)"))
+            continue
+        if e.fstype != "swap" and e.file in cur_mps:
+            plan.append(("skip", e, "mount point already in fstab"))
+            continue
+        if e.fstype == "swap" and e.spec in cur_specs:
+            plan.append(("skip", e, "swap already configured"))
+            continue
+        if resolve(e.spec) is None:
+            label = None
+            m = re.match(r"^(UUID|PARTUUID)=(.*)$", e.spec)
+            if m and m.group(2) in old_by_uuid:
+                label = old_by_uuid[m.group(2)].get("label")
+            elif e.spec.startswith("LABEL="):
+                label = e.spec[6:]
+            matches = [d for d in devs if label and d["label"] == label and d["fstype"]]
+            if len(matches) == 1 and matches[0]["uuid"]:
+                e.spec = f"UUID={matches[0]['uuid']}"
+                plan.append(("add", e, f"re-linked by label '{label}' -> {matches[0]['path']}"))
+            elif args.skip_missing:
+                plan.append(("skip", e, "device not present on this system"))
+                continue
+            else:
+                e.enabled = False
+                plan.append(("add-disabled", e, "device not present; kept as disabled entry"))
+        else:
+            plan.append(("add", e, "device found"))
+        to_add.append(e)
+        if e.enabled and e.file.startswith("/") and e.fstype != "swap":
+            mkdirs.append(e.file)
+
+    print(table(["ACTION", "MOUNT POINT", "DEVICE", "WHY"],
+                [(a, e.file, e.spec, w) for a, e, w in plan]))
+    print()
+    if not to_add:
+        print("Nothing to import.")
+        return
+    for e in to_add:
+        fs.append(e)
+
+    def post():
+        for d in mkdirs:
+            if not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+                print(f"Created mount point {d}")
+        if bundle.get("links"):
+            print(f"This bundle also has {len(bundle['links'])} home-folder link(s). Once your disks "
+                  f"are mounted run: fstabctl link import {args.bundle}")
+
+    write_fstab(fs.text(), f"import of {Path(args.bundle).name}", args, post)
+
+
+def cmd_presets(args):
+    print(table(["PRESET", "OPTIONS", "USE FOR"],
+                [(k, v[0], v[1]) for k, v in PRESETS.items()]))
+
+
+# ------------------------------------------------------------ home links --
+def home_dir(args):
+    h = getattr(args, "home", None) or os.environ.get("FSTABCTL_HOME")
+    return os.path.abspath(os.path.expanduser(h)) if h else real_user().pw_dir
+
+
+# ---- settings (~/.config/fstabctl/settings.json, shared with fstab Manager) ----
+def settings_path(home):
+    return Path(home) / ".config" / "fstabctl" / "settings.json"
+
+
+def load_settings(home):
+    st = {"key_folders": [], "tracked_links": []}
+    try:
+        data = json.loads(settings_path(home).read_text())
+        for k in st:
+            if isinstance(data.get(k), list):
+                st[k] = [str(x) for x in data[k]]
+    except (OSError, ValueError):
+        pass
+    return st
+
+
+def save_settings(home, st):
+    clean = {k: sorted({v.strip().strip("/") for v in st.get(k, []) if v.strip().strip("/")})
+             for k in ("key_folders", "tracked_links")}
+    p = settings_path(home)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    own(p.parent)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(clean, indent=2) + "\n")
+    os.replace(tmp, p)
+    own(p)
+
+
+def clean_name(n):
+    n = n.strip().strip("/")
+    if n.startswith("~/"):
+        n = n[2:]
+    c = os.path.normpath(n) if n else ""
+    if not c or c == "." or c.startswith("..") or os.path.isabs(n):
+        die(f"'{n}' isn't a folder name inside your home folder")
+    return c
+
+
+def is_empty_dir(p):
+    try:
+        return os.path.isdir(p) and not os.path.islink(p) and not os.listdir(p)
+    except OSError:
+        return False
+
+
+STANDARD_FOLDERS = [("DOCUMENTS", "Documents"), ("DOWNLOAD", "Downloads"), ("MUSIC", "Music"),
+                    ("PICTURES", "Pictures"), ("VIDEOS", "Videos")]
+
+
+def standard_folder_names(home):
+    """The five standard folders under the names your desktop uses (user-dirs.dirs)."""
+    xdg = {}
+    try:
+        for line in (Path(home) / ".config" / "user-dirs.dirs").read_text().splitlines():
+            k, eq, v = line.strip().partition("=")
+            if eq and k.startswith("XDG_") and k.endswith("_DIR"):
+                v = v.strip('"')
+                if v.startswith("$HOME/") and len(v) > 6:
+                    xdg[k[4:-4]] = v[6:]
+    except OSError:
+        pass
+    return [xdg.get(k, n) for k, n in STANDARD_FOLDERS]
+
+
+def key_folders(home):
+    out, seen = [], set()
+    mounted = mounted_points()
+    for name, custom in [(n, False) for n in standard_folder_names(home)] + \
+                        [(n, True) for n in load_settings(home)["key_folders"]]:
+        if name in seen:
+            continue
+        seen.add(name)
+        p = os.path.join(home, name)
+        k = dict(name=name, custom=custom, state="other", target="", ok=False, items=0, note="")
+        if os.path.islink(p):
+            k.update(state="link", target=os.readlink(p), ok=os.path.exists(p))
+        elif not os.path.lexists(p):
+            k["state"] = "missing"
+        elif os.path.isdir(p):
+            k["items"] = len(os.listdir(p))
+            k["state"] = "empty" if k["items"] == 0 else "files"
+            if p in mounted:
+                k.update(state="other", note="a drive is mounted here")
+        else:
+            k["note"] = "a file, not a folder"
+        out.append(k)
+    return out
+
+
+def managed_links(home):
+    """What backups and bundles keep: links directly in home, plus tracked links."""
+    paths = scan_links(home, False, 1)
+    for n in load_settings(home)["tracked_links"]:
+        p = os.path.join(home, n)
+        if p not in paths and os.path.islink(p):
+            paths.append(p)
+    return describe_links(home, sorted(paths))
+
+
+DISCOVER_SKIP = {".cache", ".var", "snap", ".local/share/Trash", ".local/share/flatpak", ".local/share/containers",
+                 ".local/share/Steam", ".steam", ".mozilla", ".thunderbird", ".config/google-chrome",
+                 ".config/chromium", ".config/BraveSoftware", ".config/Code", ".vscode", ".vscode-server", ".npm",
+                 ".nvm", ".cargo", ".rustup", ".pyenv", ".gradle", ".m2", ".android", ".wine", ".local/lib",
+                 ".local/share/virtualenvs", "go/pkg", ".docker"}
+DISCOVER_SKIP_NAMES = {"node_modules", ".git", ".venv", "venv", "__pycache__", ".tox"}
+
+
+def made_by_app(l):
+    parts = l["name"].split("/")
+    if any(p.startswith(".") for p in parts):
+        return True
+    return any((l["abs_target"] + "/").startswith(p) for p in
+               ("/usr/", "/opt/", "/snap/", "/var/lib/", "/proc/", "/run/", "/etc/", "/nix/"))
+
+
+def discover_links(home, hidden=False, max_depth=6):
+    """Search home for symlinks; skip app data, other drives and (unless hidden) hidden folders."""
+    home_dev = os.stat(home).st_dev
+    paths, state = [], {"visited": 0, "truncated": False}
+
+    def walk(d, lvl):
+        state["visited"] += 1
+        if state["visited"] > 20000 or len(paths) >= 1000:
+            state["truncated"] = True
+            return
+        try:
+            items = sorted(os.scandir(d), key=lambda x: x.name)
+        except OSError:
+            return
+        for ent in items:
+            rel = os.path.relpath(ent.path, home)
+            if ent.name.startswith(".") and not hidden:
+                continue
+            if ent.is_symlink():
+                paths.append(ent.path)
+                continue
+            if (not ent.is_dir(follow_symlinks=False) or lvl >= max_depth or rel in DISCOVER_SKIP
+                    or ent.name in DISCOVER_SKIP_NAMES):
+                continue
+            try:
+                if os.lstat(ent.path).st_dev != home_dev:
+                    continue  # another drive mounted inside home
+            except OSError:
+                continue
+            walk(ent.path, lvl + 1)
+
+    walk(home, 1)
+    kept = {l["name"] for l in managed_links(home)}
+    tracked = set(load_settings(home)["tracked_links"])
+    out = []
+    for l in describe_links(home, sorted(paths)):
+        l.update(kept=l["name"] in kept, tracked=l["name"] in tracked, by_app=made_by_app(l))
+        out.append(l)
+    return out, state["truncated"]
+
+
+def cmd_link_discover(args):
+    home = home_dir(args)
+    found, trunc = discover_links(home, args.hidden, max(1, min(10, args.max_depth)))
+    if not found:
+        print("No links found.")
+        return
+    print(table(["LINK", "TARGET", "IN BACKUPS"],
+                [("~/" + l["name"], l["target"], ("kept" if l["kept"] else "not kept")
+                  + (", by an app?" if l["by_app"] else "")) for l in found]))
+    if trunc:
+        print("\n(stopped early: the search limit was reached)")
+    print("\nKeep a link in backups and bundles with: fstabctl link track NAME")
+
+
+def _track(args, track):
+    home = home_dir(args)
+    st = load_settings(home)
+    cur = set(st["tracked_links"])
+    for raw in args.names:
+        n = clean_name(raw)
+        if track:
+            if not os.path.islink(os.path.join(home, n)):
+                die(f"~/{n} is not a symlink")
+            cur.add(n)
+            print(f"  keep ~/{n} in backups and bundles")
+        else:
+            cur.discard(n)
+            print(f"  stop keeping ~/{n} (the link itself is not touched)")
+    if args.dry_run:
+        print("\n(dry run: nothing changed)")
+        return
+    st["tracked_links"] = sorted(cur)
+    save_settings(home, st)
+    print("Saved.")
+
+
+def cmd_link_track(args):
+    _track(args, True)
+
+
+def cmd_link_untrack(args):
+    _track(args, False)
+
+
+def cmd_link_folders(args):
+    home = home_dir(args)
+    if args.action == "list":
+        rows = []
+        for k in key_folders(home):
+            state = {"link": f"link -> {k['target']}" + ("" if k["ok"] else " (BROKEN)"), "empty": "empty folder",
+                     "missing": "doesn't exist", "files": f"folder with {k['items']} item(s)"}.get(k["state"], k["note"])
+            rows.append(("~/" + k["name"], "yours" if k["custom"] else "standard", state))
+        print(table(["FOLDER", "KIND", "STATE"], rows))
+        return
+    if not args.names:
+        die(f"folders {args.action} needs a NAME")
+    st = load_settings(home)
+    cur = list(st["key_folders"])
+    for raw in args.names:
+        n = clean_name(raw)
+        if args.action == "add":
+            cur.append(n)
+            print(f"  add ~/{n} to Key folders")
+        else:
+            cur = [k for k in cur if k != n]
+            print(f"  remove ~/{n} from Key folders (the folder itself is not touched)")
+    if args.dry_run:
+        print("\n(dry run: nothing changed)")
+        return
+    st["key_folders"] = cur
+    save_settings(home, st)
+    print("Saved.")
+
+
+def fstab_mount_for(path, entries):
+    """The enabled fstab entry (other than '/') whose mount point contains path."""
+    best = None
+    for _, e in entries:
+        if not e.enabled or not e.file.startswith("/"):
+            continue
+        mp = e.file.rstrip("/")
+        if mp and (path == mp or path.startswith(mp + "/")):
+            if best is None or len(mp) > len(best.file.rstrip("/")):
+                best = e
+    return best
+
+
+def link_abs_target(link, raw):
+    return os.path.normpath(raw if os.path.isabs(raw) else os.path.join(os.path.dirname(link), raw))
+
+
+def link_path(home, name):
+    p = os.path.normpath(os.path.join(home, name))
+    if p == home or not p.startswith(home.rstrip("/") + "/"):
+        die(f"link name '{name}' must be inside {home}")
+    return p
+
+
+def scan_links(home, hidden=False, depth=1):
+    out = []
+
+    def walk(d, lvl):
+        try:
+            items = sorted(os.scandir(d), key=lambda x: x.name)
+        except OSError:
+            return
+        for ent in items:
+            if ent.name.startswith(".") and not hidden:
+                continue
+            if ent.is_symlink():
+                out.append(ent.path)
+            elif lvl < depth and ent.is_dir(follow_symlinks=False):
+                walk(ent.path, lvl + 1)
+
+    walk(home, 1)
+    return out
+
+
+def describe_links(home, paths, entries=None, mounted=None):
+    if entries is None:
+        entries = Fstab(read_fstab()).entries()
+    if mounted is None:
+        mounted = mounted_points()
+    infos = []
+    for link in paths:
+        try:
+            raw = os.readlink(link)
+        except OSError:
+            continue
+        tgt = link_abs_target(link, raw)
+        ok = os.path.exists(link)
+        e = fstab_mount_for(tgt, entries)
+        note = ""
+        if e:
+            up = e.file in mounted
+            if ok:
+                note = f"on {e.file} ({'mounted' if up else 'NOT mounted'})"
+            elif not up:
+                note = f"{e.file} is in fstab but not mounted (try: sudo fstabctl mount {e.file})"
+            else:
+                note = f"{e.file} is mounted but this path is missing"
+        elif not ok:
+            note = "target path does not exist"
+        infos.append(dict(name=os.path.relpath(link, home), target=raw, abs_target=tgt, ok=ok, note=note))
+    return infos
+
+
+def current_links(home, hidden=False, depth=1, entries=None, mounted=None):
+    return describe_links(home, scan_links(home, hidden, depth), entries, mounted)
+
+
+def make_symlink(src, link):
+    """Create or atomically replace a symlink (never touches real files/dirs)."""
+    d = os.path.dirname(link)
+    os.makedirs(d, exist_ok=True)
+    tmp = os.path.join(d, f".fstabctl-link-{os.getpid()}")
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    os.symlink(src, tmp)
+    try:
+        os.replace(tmp, link)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+    if os.geteuid() == 0 and invoker():
+        u = real_user()
+        os.lchown(link, u.pw_uid, u.pw_gid)
+
+
+def list_link_snaps():
+    d = backup_dir()
+    out = []
+    if d.is_dir():
+        for p in sorted(d.glob("links-*.json"), key=_id_key, reverse=True):
+            try:
+                m = json.loads(p.read_text())
+                m["file"] = str(p)
+                out.append(m)
+            except (OSError, ValueError):
+                continue
+    return out
+
+
+def save_link_snap(home, links, note="", dedupe=False):
+    payload = [{"name": l["name"], "target": l["target"]} for l in links]
+    h = sha(json.dumps(payload, sort_keys=True))
+    snaps = list_link_snaps()
+    if dedupe and snaps and snaps[0].get("sha256") == h and snaps[0].get("home") == home:
+        return snaps[0]
+    d = backup_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    own(d)
+    now = dt.datetime.now()
+    sid = now.strftime("%Y%m%d-%H%M%S")
+    n = 1
+    while (d / f"links-{sid}.json").exists():
+        n += 1
+        sid = now.strftime("%Y%m%d-%H%M%S") + f"-{n}"
+    meta = dict(id=sid, created=now.isoformat(timespec="seconds"), host=socket.gethostname(),
+                home=home, note=note, sha256=h, links=payload)
+    p = d / f"links-{sid}.json"
+    p.write_text(json.dumps(meta, indent=2))
+    own(p)
+    meta["file"] = str(p)
+    return meta
+
+
+def snap_before(args, home, names, note):
+    depth = max(getattr(args, "depth", 1), max(n.count("/") + 1 for n in names))
+    links = managed_links(home)
+    have = {l["name"] for l in links}
+    links += [l for l in current_links(home, getattr(args, "hidden", False), depth) if l["name"] not in have]
+    return save_link_snap(home, links, f"auto: before {note}", dedupe=True)
+
+
+def cmd_link_list(args):
+    home = home_dir(args)
+    links = current_links(home, args.hidden, args.depth)
+    if not links:
+        print(f"No symlinks found in {home} (depth {args.depth}). Try --hidden or --depth N.")
+        return
+    print(table(["LINK", "TARGET", "STATUS", "NOTE"],
+                [(l["name"], l["target"], "ok" if l["ok"] else "BROKEN", l["note"]) for l in links]))
+
+
+def cmd_link_check(args):
+    home = home_dir(args)
+    links = current_links(home, args.hidden, args.depth)
+    bad = [l for l in links if not l["ok"]]
+    print(f"{len(links)} symlink(s) in {home}, {len(bad)} broken.")
+    for l in bad:
+        print(f"  BROKEN  ~/{l['name']} -> {l['target']}\n          {l['note']}")
+    sys.exit(1 if bad else 0)
+
+
+def cmd_link_add(args):
+    home = home_dir(args)
+    target = os.path.abspath(os.path.expanduser(args.target))
+    name = args.name or os.path.basename(target.rstrip("/"))
+    if not name:
+        die("could not derive a link name; pass NAME")
+    link = link_path(home, name)
+    if link == target or target.startswith(link + "/"):
+        die(f"~/{name} can't link to itself or to a folder inside it ({target})")
+    entries = Fstab(read_fstab()).entries()
+    mnt = fstab_mount_for(target, entries)
+    replacing = getattr(args, "replace_empty", False) and is_empty_dir(link) and not os.path.ismount(link)
+    adopting = args.adopt and os.path.lexists(link) and not os.path.islink(link) and not replacing
+    if (adopting or args.mkdir_target) and mnt and mnt.file not in mounted_points():
+        die(f"{target} is under {mnt.file}, which is in fstab but not mounted. Writing now would put "
+            f"data on the wrong disk (underneath the mount point).\n       Mount it first: sudo mount {mnt.file}")
+    plan = []
+    if os.path.islink(link):
+        cur = os.readlink(link)
+        if link_abs_target(link, cur) == target and not args.relative:
+            print(f"~/{name} already points to {target}")
+            return
+        if not args.force:
+            die(f"~/{name} is already a symlink to {cur}; use --force (or 'link set') to repoint it")
+        plan.append(f"replace existing symlink (was -> {cur})")
+    elif replacing:
+        plan.append(f"replace the empty folder ~/{name} with a link")
+    elif os.path.lexists(link):
+        kind = "directory" if os.path.isdir(link) else "file"
+        if not args.adopt:
+            if getattr(args, "replace_empty", False) and kind == "directory":
+                die(f"~/{name} isn't empty, so it can't be replaced by a link. Move its contents first, "
+                    f"or use --adopt to move the whole folder to {target}.")
+            die(f"{link} already exists as a real {kind}. Use --adopt to move it to {target} and link back.")
+        if os.path.ismount(link):
+            die(f"{link} is a mount point; refusing to move it")
+        if os.path.lexists(target):
+            die(f"{target} already exists; merge the two by hand, then re-run")
+        if not os.path.isdir(os.path.dirname(target)):
+            die(f"{os.path.dirname(target)} does not exist; is the disk mounted?")
+        plan.append(f"MOVE {link} -> {target}  (close any apps using it first)")
+    if not adopting and not os.path.exists(target):
+        if args.mkdir_target:
+            plan.append(f"create directory {target}")
+        elif args.allow_missing:
+            print(f"warning: {target} does not exist yet; the link will be broken until it does")
+        else:
+            die(f"{target} does not exist. Use --mkdir-target to create it, or --allow-missing.")
+    src = os.path.relpath(target, os.path.dirname(link)) if args.relative else target
+    plan.append(f"link ~/{name} -> {src}")
+    print("Plan:")
+    for p in plan:
+        print("  - " + p)
+    if args.dry_run:
+        print("\n(dry run: nothing changed)")
+        return
+    if (adopting or args.force) and not confirm("\nProceed?", args.yes):
+        print("Cancelled.")
+        return
+    snap_before(args, home, [name], f"link add {name}")
+    if args.mkdir_target and not os.path.exists(target):
+        os.makedirs(target, exist_ok=True)
+    if adopting:
+        shutil.move(link, target)
+    if replacing:
+        try:
+            os.rmdir(link)  # only works on an empty folder, so nothing can be lost
+        except OSError as ex:
+            die(f"~/{name} is no longer empty, so it was left alone: {ex}")
+    make_symlink(src, link)
+    print(f"Done: ~/{name} -> {src}")
+
+
+def cmd_link_set(args):
+    home = home_dir(args)
+    if not os.path.islink(link_path(home, args.name)):
+        die(f"~/{args.name} is not an existing symlink (use 'link add' to create one)")
+    args.adopt, args.force, args.mkdir_target = False, True, False
+    args.target, args.name = args.target, args.name
+    cmd_link_add(args)
+
+
+def cmd_link_remove(args):
+    home = home_dir(args)
+    links = []
+    for name in args.names:
+        link = link_path(home, name)
+        if not os.path.islink(link):
+            die(f"~/{name} is not a symlink; fstabctl only ever removes symlinks, never real files")
+        links.append((name, link, os.readlink(link)))
+    for name, _, raw in links:
+        print(f"  remove ~/{name} (-> {raw})")
+    if args.restore_folder:
+        print("  then create an empty local folder in each link's place")
+    print("The data the links point to is not touched.")
+    if args.dry_run:
+        print("\n(dry run: nothing changed)")
+        return
+    if not confirm("\nProceed?", args.yes):
+        print("Cancelled.")
+        return
+    snap_before(args, home, [n for n, _, _ in links], "link remove")
+    for _, link, _ in links:
+        os.unlink(link)
+        if args.restore_folder:
+            try:
+                os.mkdir(link, 0o755)
+                own(Path(link))
+            except OSError:
+                pass
+    print(f"Removed {len(links)} link(s). Undo with: fstabctl link restore")
+
+
+def plan_links(home, items, old_home=None, force=False):
+    plan = []
+    for it in items:
+        name, raw = it["name"], it["target"]
+        link = link_path(home, name)
+        if old_home and old_home != home and (raw == old_home or raw.startswith(old_home.rstrip("/") + "/")):
+            raw = home + raw[len(old_home):]
+        if os.path.islink(link):
+            cur = os.readlink(link)
+            if cur == raw:
+                plan.append(("skip", name, raw, "already correct"))
+                continue
+            if not force:
+                plan.append(("skip", name, raw, f"currently -> {cur}; use --force to replace"))
+                continue
+            act = "replace"
+        elif is_empty_dir(link):
+            act = "replace-empty"  # e.g. a fresh install's empty ~/Documents
+        elif os.path.lexists(link):
+            plan.append(("skip", name, raw, "a real file/directory is in the way"))
+            continue
+        else:
+            act = "create"
+        miss = not os.path.exists(link_abs_target(link, raw))
+        plan.append((act, name, raw, "target missing right now (mount disks first?)" if miss else ""))
+    return plan
+
+
+def run_link_plan(home, plan, args, note, settings=None):
+    print(table(["ACTION", "LINK", "TARGET", "NOTE"], plan) if plan else "No links in source.")
+    todo = [p for p in plan if p[0] in ("create", "replace", "replace-empty")]
+    extra = bool(settings and (settings.get("key_folders") or settings.get("tracked_links")))
+    if extra:
+        print(f"\nAlso restores your Key folders list ({len(settings.get('key_folders', []))}) "
+              f"and tracked links ({len(settings.get('tracked_links', []))}).")
+    if not todo and not extra:
+        print("\nNothing to do.")
+        return
+    if args.dry_run:
+        print("\n(dry run: nothing changed)")
+        return
+    if not confirm(f"\n{len(todo)} link(s) will be created/replaced. Apply?", args.yes):
+        print("Cancelled.")
+        return
+    if todo:
+        snap_before(args, home, [p[1] for p in todo], note)
+    for act, name, raw, _ in todo:
+        link = link_path(home, name)
+        if act == "replace-empty":
+            try:
+                os.rmdir(link)
+            except OSError:
+                print(f"skipped ~/{name}: it is no longer empty")
+                continue
+        make_symlink(raw, link)
+    if extra:
+        st = load_settings(home)
+        st["key_folders"] += settings.get("key_folders", [])
+        st["tracked_links"] += settings.get("tracked_links", [])
+        save_settings(home, st)
+    print(f"Done: {len(todo)} link(s) written. Check them with: fstabctl link check")
+
+
+def cmd_link_backup(args):
+    home = home_dir(args)
+    s = save_link_snap(home, managed_links(home), args.note or "manual")
+    print(f"Link snapshot {s['id']} saved ({len(s['links'])} links) to {s['file']}")
+
+
+def cmd_link_backups(args):
+    snaps = list_link_snaps()
+    if not snaps:
+        print(f"No link snapshots in {backup_dir()}")
+        return
+    print(table(["ID", "CREATED", "HOME", "LINKS", "NOTE"],
+                [(s["id"], s["created"], s.get("home", ""), len(s["links"]), s.get("note", ""))
+                 for s in snaps]))
+
+
+def cmd_link_restore(args):
+    snaps = list_link_snaps()
+    if not snaps:
+        die(f"no link snapshots in {backup_dir()}")
+    snap = snaps[0] if args.backup == "latest" else next(
+        (s for s in snaps if s["id"].startswith(args.backup)), None)
+    if not snap:
+        die(f"no link snapshot matching '{args.backup}' (try: fstabctl link backups)")
+    home = home_dir(args)
+    print(f"Restoring link snapshot {snap['id']} ({snap.get('note', '')})\n")
+    run_link_plan(home, plan_links(home, snap["links"], snap.get("home"), args.force), args,
+                  f"restore of {snap['id']}")
+
+
+def cmd_link_import(args):
+    try:
+        bundle = json.loads(Path(args.bundle).read_text())
+    except (OSError, ValueError) as ex:
+        die(f"cannot read bundle: {ex}")
+    if bundle.get("tool") != "fstabctl":
+        die("not an fstabctl bundle (create one with: fstabctl export)")
+    home = home_dir(args)
+    plan = plan_links(home, bundle.get("links", []), bundle.get("home"), args.force)
+    if args.skip_missing:
+        plan = [("skip", n, t, "target missing") if a in ("create", "replace") and "missing" in note
+                else (a, n, t, note) for a, n, t, note in plan]
+    run_link_plan(home, plan, args, f"link import of {Path(args.bundle).name}",
+                  {"key_folders": bundle.get("key_folders") or [], "tracked_links": bundle.get("tracked_links") or []})
+
+
+# ------------------------------------------------------------------- GUI --
+def cmd_gui(args):
+    """The desktop app (fstab Manager) is a separate Go program; this just starts it."""
+    here = Path(__file__).resolve().parent
+    cands = [here / "fstab-manager", here / "fstabctl-gui"]
+    for name in ("fstab-manager", "fstabctl-gui"):
+        found = shutil.which(name)
+        if found:
+            cands.append(Path(found))
+    extra = ["--no-notify"] if args.no_notify else []
+    for c in cands:
+        if c.is_file() and os.access(c, os.X_OK):
+            os.execv(str(c), [str(c)] + extra)
+    die("the desktop app, fstab Manager, is a separate program ('fstab-manager').\n"
+        "       Install the fstab-manager package, or put the binary next to this script or in your PATH.")
+
+
+# ---------------------------------------------------------------- CLI ------
+def build_parser():
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-n", "--dry-run", action="store_true", help="show changes, write nothing")
+    common.add_argument("-y", "--yes", action="store_true", help="don't ask for confirmation")
+    common.add_argument("--fstab", help="operate on this file instead of /etc/fstab")
+
+    p = argparse.ArgumentParser(prog="fstabctl", description="Manage, back up, restore and export fstab.")
+    p.add_argument("--version", action="version", version=f"fstabctl {VERSION}")
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="command")
+
+    linkopts = argparse.ArgumentParser(add_help=False)
+    linkopts.add_argument("--home", help="home directory to manage (default: yours, even under sudo)")
+    linkopts.add_argument("--depth", type=int, default=1,
+                          help="how deep to look for symlinks (default 1 = directly inside home)")
+    linkopts.add_argument("--hidden", action="store_true", help="include dotfiles/dot-directories")
+
+    def add(name, fn, help_, link=False):
+        s = sub.add_parser(name, parents=[common, linkopts] if link else [common],
+                           help=help_, description=help_)
+        s.set_defaults(fn=fn)
+        return s
+
+    add("list", cmd_list, "show fstab entries with live status")
+    add("scan", cmd_scan, "show disks/partitions and which are not in fstab")
+
+    s = add("add", cmd_add, "add an entry (interactive wizard if no device given)")
+    s.add_argument("device", nargs="?", help="/dev/sdb1, UUID=..., LABEL=..., or host:/path, //host/share")
+    s.add_argument("mountpoint", nargs="?")
+    s.add_argument("-t", "--fstype")
+    s.add_argument("-o", "--options", help="explicit mount options (overrides preset)")
+    s.add_argument("-p", "--preset", choices=list(PRESETS))
+    s.add_argument("--by", choices=["uuid", "label", "partuuid", "path"], default="uuid",
+                   help="how to identify the device (default: uuid)")
+    s.add_argument("--dump", type=int, default=0)
+    s.add_argument("--passno", type=int, help="fsck order (default: 2 for ext*, else 0)")
+    s.add_argument("--no-mkdir", action="store_true", help="don't create the mount point")
+
+    expect_help = "only act if this entry's device is still SPEC (guards '#' numbers against a changed fstab)"
+    s = add("remove", cmd_remove, "delete an entry")
+    s.add_argument("target", help="mount point, device spec, or # from 'list'")
+    s.add_argument("--force", action="store_true")
+    s.add_argument("--expect", metavar="SPEC", help=expect_help)
+    for name, fn, hlp in (("disable", cmd_disable, "comment out an entry (keeps it for later)"),
+                          ("enable", cmd_enable, "re-enable a disabled entry")):
+        s = add(name, fn, hlp)
+        s.add_argument("target")
+        s.add_argument("--force", action="store_true")
+        s.add_argument("--expect", metavar="SPEC", help=expect_help)
+
+    s = add("mount", cmd_mount, "mount entries now, without rebooting")
+    s.add_argument("target", nargs="?", help="mount point, device spec, or # from 'list'")
+    s.add_argument("--all", action="store_true", help="every enabled entry that should be mounted but isn't")
+    s.add_argument("--expect", metavar="SPEC", help=expect_help)
+
+    s = add("repair", cmd_repair, "fix a line that can't be read")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--comment-out", type=int, metavar="LINE", help="put a # in front of line LINE")
+    g.add_argument("--add-defaults", type=int, metavar="LINE",
+                   help="complete a 3-field line with 'defaults' (+ nofail) and 0 0")
+    s.add_argument("--expect", metavar="TEXT", help="only act if the line still reads TEXT")
+
+    s = add("set", cmd_set, "change fields of an existing entry")
+    s.add_argument("target")
+    s.add_argument("-o", "--options", help="replace all options")
+    s.add_argument("--add-options", help="comma-separated options to add")
+    s.add_argument("--remove-options", help="comma-separated options to remove")
+    s.add_argument("-t", "--fstype")
+    s.add_argument("--device")
+    s.add_argument("--mountpoint")
+    s.add_argument("--passno", type=int)
+    s.add_argument("--expect", metavar="SPEC", help=expect_help)
+
+    s = add("backup", cmd_backup, "save a timestamped copy of fstab")
+    s.add_argument("--note", help="label for this backup")
+    add("backups", cmd_backups, "list saved backups")
+    s = add("diff", cmd_diff, "compare current fstab with a backup")
+    s.add_argument("backup", nargs="?", default="latest")
+    s = add("restore", cmd_restore, "restore fstab from a backup (current is backed up first)")
+    s.add_argument("backup", nargs="?", default="latest", help="id, 'latest', or file path")
+
+    add("verify", cmd_verify, "check fstab for errors and risky settings")
+    s = add("report", cmd_report, "human-readable report of the current configuration", link=True)
+    s.add_argument("-f", "--format", choices=["text", "markdown"])
+    s.add_argument("-o", "--output")
+    s = add("export", cmd_export, "write a portable JSON bundle (fstab entries, disk inventory, home links)",
+          link=True)
+    s.add_argument("-o", "--output")
+    s = add("import", cmd_import, "merge a bundle into this system's fstab")
+    s.add_argument("bundle")
+    s.add_argument("--include-system", action="store_true", help="also import /, /boot, /boot/efi")
+    s.add_argument("--skip-missing", action="store_true", help="skip entries whose device is absent "
+                   "(default: add them as disabled)")
+    # ---- home-folder symlinks
+    lp = sub.add_parser("link", help="manage symlinks in your home folder",
+                        description="Create, repoint, remove, check, back up and restore symlinks in "
+                                    "your home folder (e.g. ~/Music -> /mnt/data/Music).")
+    ls = lp.add_subparsers(dest="linkcmd", required=True, metavar="action")
+
+    def ladd(name, fn, help_):
+        s = ls.add_parser(name, parents=[common, linkopts], help=help_, description=help_)
+        s.set_defaults(fn=fn)
+        return s
+
+    ladd("list", cmd_link_list, "show symlinks in home and whether they work")
+    ladd("check", cmd_link_check, "report broken links and why (exit 1 if any)")
+    s = ladd("add", cmd_link_add, "create a symlink in home pointing at TARGET")
+    s.add_argument("target", help="what to link to, e.g. /mnt/data/Music")
+    s.add_argument("name", nargs="?", help="link name inside home (default: basename of target)")
+    s.add_argument("--adopt", action="store_true",
+                   help="if NAME is a real directory, move it to TARGET first, then link back")
+    s.add_argument("--force", action="store_true", help="replace an existing symlink")
+    s.add_argument("--relative", action="store_true", help="create a relative link")
+    s.add_argument("--mkdir-target", action="store_true", help="create TARGET if missing")
+    s.add_argument("--allow-missing", action="store_true", help="allow a link to a missing target")
+    s.add_argument("--replace-empty", action="store_true",
+                   help="if NAME is an empty folder, replace it with the link (folders with files are never touched)")
+    s = ladd("set", cmd_link_set, "repoint an existing symlink")
+    s.add_argument("name")
+    s.add_argument("target")
+    s.add_argument("--relative", action="store_true")
+    s.add_argument("--allow-missing", action="store_true")
+    s = ladd("remove", cmd_link_remove, "remove symlinks (never touches real files)")
+    s.add_argument("names", nargs="+")
+    s.add_argument("--restore-folder", action="store_true",
+                   help="put an empty local folder back where each link was")
+    s = ladd("discover", cmd_link_discover, "search your home folder for links (skips app data and other drives)")
+    s.add_argument("--max-depth", type=int, default=6, help="how many folders deep to search (default 6)")
+    s = ladd("track", cmd_link_track, "keep these links (relative to home) in backups and bundles")
+    s.add_argument("names", nargs="+")
+    s = ladd("untrack", cmd_link_untrack, "stop keeping these links in backups and bundles")
+    s.add_argument("names", nargs="+")
+    s = ladd("folders", cmd_link_folders, "show or edit Key folders (Documents, Downloads, ... plus your own)")
+    s.add_argument("action", nargs="?", default="list", choices=["list", "add", "remove"])
+    s.add_argument("names", nargs="*")
+    s = ladd("backup", cmd_link_backup, "snapshot current home links")
+    s.add_argument("--note")
+    ladd("backups", cmd_link_backups, "list link snapshots")
+    s = ladd("restore", cmd_link_restore, "recreate links from a snapshot")
+    s.add_argument("backup", nargs="?", default="latest")
+    s.add_argument("--force", action="store_true", help="replace links that now point elsewhere")
+    s = ladd("import", cmd_link_import, "recreate links from an 'export' bundle")
+    s.add_argument("bundle")
+    s.add_argument("--force", action="store_true")
+    s.add_argument("--skip-missing", action="store_true", help="skip links whose target doesn't exist yet")
+
+    s = add("gui", cmd_gui, "open the desktop app, fstab Manager (a separate program)")
+    s.add_argument("--no-notify", action="store_true", help="no desktop notifications when a disk is plugged in")
+
+    add("presets", cmd_presets, "list option presets for 'add'")
+    return p
+
+
+def main():
+    global FSTAB_PATH
+    args = build_parser().parse_args()
+    if args.fstab:
+        FSTAB_PATH = Path(args.fstab)
+    elif os.environ.get("FSTABCTL_FSTAB"):
+        FSTAB_PATH = Path(os.environ["FSTABCTL_FSTAB"])
+    try:
+        args.fn(args)
+    except KeyboardInterrupt:
+        print("\nAborted.", file=sys.stderr)
+        sys.exit(130)
+    except BrokenPipeError:
+        pass
+
+
+if __name__ == "__main__":
+    main()

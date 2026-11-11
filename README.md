@@ -1,30 +1,47 @@
-# fstab Manager User Guide
-
-Nov 11, 2026 · @Cameron Stevens
+# fstab Manager
 
 fstab Manager keeps your disks mounted where they belong, fixes fstab problems before they stop your computer booting, and brings your setup back after a reinstall. Every change is shown as a preview first and backed up before it's written.
 
-## Getting started
+| Part | What it is | Written in |
+|---|---|---|
+| **fstab Manager** (`fstab-manager`) | Desktop app in its own window, with live detection of plugged-in drives | Go + Wails (WebKitGTK) |
+| **fstabctl** | Command-line tool (does everything the app does, plus an interactive wizard) | Python 3.8+, standard library only |
 
-fstab Manager comes as two packages. Install both, or just the one you want:
+Both read and write the **same files** (backups, snapshots, export bundles), so you can mix them freely.
 
-| Package | What it is |
-| --- | --- |
-| `fstab-manager` | The desktop app, in its own window |
-| `fstabctl` | The command-line tool, which does the same jobs from a terminal |
+## Install
 
-**Pop!\_OS, Ubuntu, Debian, Linux Mint:** download the two `.deb` files, then in a terminal run:
+**Debian, Ubuntu, Pop!_OS, Linux Mint and derivatives** (built and tested on Ubuntu 24.04; the package also allows Ubuntu 22.04, untested)
 
 ```sh
-cd ~/Downloads
 sudo apt install ./fstab-manager_0.6.6-1_amd64.deb ./fstabctl_0.6.1-2_all.deb
 ```
 
-**Fedora, openSUSE:** use the `.rpm` files with `sudo dnf install ./fstab-manager-0.6.6-1.x86_64.rpm ./fstabctl-0.6.1-2.noarch.rpm`.
+**Fedora, RHEL and derivatives, openSUSE**
 
-The package manager adds anything missing, such as the system's WebKitGTK library. Installing over an older version replaces it; your backups and settings are kept.
+```sh
+sudo dnf install ./fstab-manager-0.6.6-1.x86_64.rpm ./fstabctl-0.6.1-2.noarch.rpm
+```
 
-**First launch.** Open **fstab Manager** from your application menu. A splash screen shows the version and author, then closes by itself after 15 seconds; click **×** or press Esc to close it sooner. You can see it again any time with the blue **?** in the bottom-left corner.
+The two packages are independent: install either or both. The desktop app needs GTK 3 and WebKitGTK 4.1, which the
+package manager installs if they're missing (most desktops already have them). The CLI needs Python 3.8 or newer.
+Upgrading from the earlier `fstabctl-gui` package replaces it automatically; the `fstabctl-gui` command still works.
+
+The packages are built for x86-64. For ARM, build them on an ARM machine with `make packages` (see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)).
+
+**Without a package manager**: copy the programs into your `PATH`:
+
+```sh
+install -m755 fstab-manager-linux-amd64 ~/.local/bin/fstab-manager
+install -m755 fstabctl ~/.local/bin/fstabctl
+```
+
+Checksums for every release file are in `SHA256SUMS`.
+
+## First launch
+
+Open **fstab Manager** from your application menu. A splash screen shows the version and author, then closes by itself after 15 seconds; click **×** or press Esc to close it sooner. You can see it again any time with the blue **?** in the bottom-left corner.
 
 Run the app as your normal user. When a change needs administrator rights, your desktop asks for your password.
 
@@ -48,7 +65,7 @@ Six tabs sit under the header:
 
 The footer at the bottom shows the version. The blue **?** next to it opens About. **Quit**, at the top right, closes the app.
 
-&#91;image: The Overview tab: status chips in the header, counts, and findings that explain each problem with buttons to fix it\]
+![The Overview tab: status chips in the header, counts, and findings that explain each problem with buttons to fix it](docs/images/overview.png)
 
 ## Overview and findings
 
@@ -134,7 +151,7 @@ Documents, Downloads, Music, Pictures and Videos are listed under the names your
 | On this computer, N items | Move its files first; only an empty folder can be linked elsewhere, so nothing is ever lost |
 | → /storage/Music | **Repoint…** to change it, or **Make local again…** to go back to a local folder (your files stay where they are) |
 
-&#91;image: Key folders: Documents, Downloads and Music linked to /storage; Pictures has files; Videos is empty and ready to link; Claude Assistance added as your own folder\]
+![Key folders: Documents, Downloads and Music linked to /storage; Pictures has files; Videos is empty and ready to link; Claude Assistance added as your own folder](docs/images/key-folders.png)
 
 **To link a key folder:**
 
@@ -256,4 +273,31 @@ The app and `fstabctl` share these files, so you can use either one. Backups alw
 
 To keep backups somewhere that survives a reinstall, add `export FSTABCTL_BACKUP_DIR=/storage/fstab-backups` (or another folder on a data drive) to `~/.profile`, then log out and back in.
 
-**About:** fstab Manager is made by csTechnologies, [cstevens.ca](https://cstevens.ca). MIT License.
+## More documentation
+
+| Document | Read it for |
+|---|---|
+| [docs/USER-GUIDE.md](docs/USER-GUIDE.md) | A detailed tour of the app and the CLI, with more workflows |
+| [docs/REFERENCE.md](docs/REFERENCE.md) | Every command, option, environment variable, exit code, finding and file format |
+| [docs/SECURITY.md](docs/SECURITY.md) | How privileges work, what the app allows, what is and isn't protected |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Fixes for common problems, including recovering from a bad fstab |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Architecture, building, testing, packaging |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each version |
+
+Installed packages put these under `/usr/share/doc/fstab-manager/` (or `fstabctl/`), and provide
+`man fstab-manager` and `man fstabctl`.
+
+## Status and limits
+
+- Linux only (fstab does not exist in this form elsewhere). The app was exercised on x86-64 Ubuntu 24.04 in a virtual
+  display; it has not yet been run on a real desktop session, on ARM, or through a reboot.
+- Not managed: `/etc/crypttab` (encrypted drives), LVM/RAID setup, btrfs subvolume creation, formatting or
+  partitioning. Existing entries for these are shown and preserved.
+- The polkit password dialog and desktop notifications depend on your desktop session and have not been tested
+  on every environment. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+- Always look at the diff before applying, and keep a rescue plan for boot-critical changes.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 Cameron Stevens.
+fstab Manager is a csTechnologies project: [cstevens.ca](https://cstevens.ca).

@@ -1,0 +1,160 @@
+.TH FSTABCTL 1 "2026" "fstabctl" "User Commands"
+.SH NAME
+fstabctl \- manage, back up, restore and export fstab and home\-folder symlinks
+.SH SYNOPSIS
+.B fstabctl
+.RB [ \-\-version ]
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B fstabctl
+lists, adds, edits, backs up, restores, verifies and exports /etc/fstab entries, and manages
+symlinks from the home folder to data disks. Every change is validated, shown as a diff and
+backed up automatically before it is written. Commands that change /etc/fstab need root.
+.PP
+Options accepted by all commands that change something:
+.TP
+.BR \-n ", " \-\-dry\-run
+Show the diff or plan; write nothing.
+.TP
+.BR \-y ", " \-\-yes
+Do not ask for confirmation.
+.TP
+.BI \-\-fstab " PATH"
+Operate on this file instead of /etc/fstab.
+.SH COMMANDS
+.TP
+.B list
+Show fstab entries with live status (mounted, not mounted, device missing, disabled).
+.TP
+.B scan
+Show disks and partitions and which are not in fstab.
+.TP
+.BR add " [\fIDEVICE\fR [\fIMOUNTPOINT\fR]]"
+Add an entry. With no device, an interactive wizard runs. Options:
+.BR \-t ", " \-\-fstype ;
+.BR \-o ", " \-\-options " (overrides the preset);"
+.BR \-p ", " \-\-preset " {data,ssd,usb,windows,nfs,cifs};"
+.BR \-\-by " {uuid,label,partuuid,path};"
+.BR \-\-dump ;
+.BR \-\-passno ;
+.BR \-\-no\-mkdir .
+.TP
+.BI set " TARGET"
+Change an entry:
+.BR \-o ", " \-\-add\-options ", " \-\-remove\-options ", " \-t ", " \-\-device ", " \-\-mountpoint ", " \-\-passno .
+.TP
+.BI remove " TARGET"
+Delete an entry. Boot\-critical mounts (/, /boot, /boot/efi, /efi) need
+.BR \-\-force .
+.TP
+.BI disable " TARGET"
+Comment an entry out, keeping it for later (marker #fstabctl\-disabled#).
+.TP
+.BI enable " TARGET"
+Re\-enable a disabled entry.
+.PP
+.BR set ", " remove ", " disable ", " enable " and " mount
+also accept
+.BI \-\-expect " SPEC"\fR:
+act only if the entry's device is still SPEC. This guards a
+.I TARGET
+given as a # number against an fstab that changed in the meantime.
+.TP
+.RI mount " [TARGET]"
+Mount an entry now, without rebooting.
+.B \-\-all
+mounts every enabled entry that should be mounted but isn't, skipping disks that are not connected, entries
+that mount on first access (noauto, x\-systemd.automount) and boot\-critical mounts. Runs
+.B systemctl daemon\-reload
+first on systemd systems. Needs root.
+.TP
+.B repair
+Fix a line that can't be read.
+.BI \-\-comment\-out " LINE"
+puts a # in front of it;
+.BI \-\-add\-defaults " LINE"
+completes a line that has only device, mount point and type with "defaults" (plus nofail for
+non\-system mounts) and "0 0". Refuses lines that are not broken.
+.BI \-\-expect " TEXT"
+acts only if the line still reads TEXT.
+.TP
+.B backup
+Save a timestamped copy of fstab (\fB\-\-note\fR TEXT).
+.TP
+.B backups
+List saved backups.
+.TP
+.RI diff " [BACKUP]"
+Compare the current fstab with a backup (default: latest).
+.TP
+.RI restore " [BACKUP]"
+Restore from a backup ID, unique prefix, "latest" or file path. The current file is backed up first.
+.TP
+.B verify
+Check for errors and risky settings; exit status 1 if errors are found.
+.TP
+.B report
+Human\-readable report.
+.BR \-f " text|markdown, " \-o " FILE."
+.TP
+.B export
+Write a portable JSON bundle (entries, disk inventory, home links).
+.BR \-o " FILE."
+.TP
+.BI import " BUNDLE"
+Merge a bundle into this system's fstab.
+.BR \-\-include\-system ", " \-\-skip\-missing .
+.TP
+.BI link " ACTION"
+Manage symlinks in the home folder: list, check, add, set, remove, backup, backups, restore, import,
+discover (search home for links), track and untrack (keep links in backups and bundles), and folders
+(Key folders: Documents, Downloads, Music, Pictures, Videos and your own). See
+.B fstabctl link ACTION \-\-help
+for each.
+Options:
+.BR \-\-home ", " \-\-depth ", " \-\-hidden ;
+for add:
+.BR \-\-adopt ", " \-\-force ", " \-\-relative ", " \-\-mkdir\-target ", " \-\-allow\-missing .
+.TP
+.B gui
+Open the desktop app, fstab Manager,
+.BR fstab\-manager (1).
+.TP
+.B presets
+List the option presets used by
+.BR add .
+.SH ENVIRONMENT
+.TP
+.B FSTABCTL_FSTAB
+fstab file to operate on (default /etc/fstab).
+.TP
+.B FSTABCTL_BACKUP_DIR
+Directory for backups and snapshots.
+.TP
+.B FSTABCTL_REAL_USER
+User whose home and ownership are used when running as root (SUDO_USER is the fallback).
+.SH FILES
+.TP
+.I /etc/fstab
+The file being managed.
+.TP
+.I ~/.local/share/fstabctl/backups/
+Backups (fstab\-ID.bak and .json) and link snapshots (links\-ID.json).
+.SH EXIT STATUS
+.TP
+.B 0
+Success, nothing to change, or a dry run.
+.TP
+.B 1
+Error; or verify found errors; or link check found broken links.
+.TP
+.B 2
+A change was refused because it would introduce a validation problem, or a usage error.
+.SH SEE ALSO
+.BR fstab\-manager (1),
+.BR fstab (5),
+.BR findmnt (8),
+.BR mount (8)
+.PP
+Full documentation: /usr/share/doc/fstabctl/
