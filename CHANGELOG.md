@@ -3,6 +3,12 @@
 Versions are per component: **CLI** is `fstabctl` (Python), **GUI** is fstab Manager, `fstab-manager` (Go; called
 `fstabctl-gui` up to 0.3.0).
 
+## 2026-11-11: beta packages fstab Manager 0.6.6-2, fstabctl 0.6.1-3
+
+### Added
+- A [`beta/`](beta/) folder with ready-to-install `.deb` and `.rpm` packages, checksums and install steps.
+- Package rebuilds: the copyright notice now says Cameron Stevens, matching `LICENSE`. No changes to the programs.
+
 ## 2026-11-11: repository on GitHub
 
 ### Changed
