@@ -45,7 +45,7 @@ import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-VERSION = "0.6.1"
+VERSION = "0.7.0"
 FSTAB_PATH = Path("/etc/fstab")
 DISABLED_MARK = "#fstabctl-disabled#"
 SYSTEM_MOUNTS = {"/", "/boot", "/boot/efi", "/efi"}
@@ -856,6 +856,107 @@ def cmd_mount(args):
             print(f"✓ mounted {e.file}")
     if failed:
         die(f"{failed} of {len(plan)} mounts failed")
+
+
+OWNABLE_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "jfs", "reiserfs", "zfs", "tmpfs", "bcachefs", "nilfs2"}
+WINDOWS_FS = {"vfat", "fat", "msdos", "exfat", "ntfs", "ntfs3", "ntfs-3g"}
+OWN_PROTECTED = {"/", "/boot", "/boot/efi", "/efi", "/home", "/usr", "/var", "/etc", "/opt", "/root", "/tmp", "/srv",
+                 "/nix", "/snap"}
+
+
+def _own_walk(root, recursive, visit):
+    """Call visit(path) for root and (recursive) everything below it on the same drive; never follows links.
+    Returns the folders skipped because another drive is mounted there."""
+    visit(root)
+    skipped = []
+    if not recursive:
+        return skipped
+    dev = os.lstat(root).st_dev
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        keep = []
+        for d in dirnames:
+            p = os.path.join(dirpath, d)
+            try:
+                if os.lstat(p).st_dev != dev:
+                    skipped.append(p)
+                    continue
+            except OSError:
+                continue
+            keep.append(d)
+            visit(p)
+        dirnames[:] = keep
+        for f in filenames:
+            visit(os.path.join(dirpath, f))
+    return skipped
+
+
+def cmd_own(args):
+    """Make you the owner of a mounted drive's folder (--recursive: everything on the drive below it):
+    `sudo chown [-R] you:you DIR`, with safety checks."""
+    fs = Fstab(read_fstab())
+    _, e = find_expected(fs, args)
+    d = e.file
+    u = real_user()
+    if not e.enabled:
+        die(f"{d} is disabled; enable and mount it first")
+    if e.fstype == "swap" or d in ("none", "swap"):
+        die(f"{e.spec} is swap, not a folder")
+    if os.path.normpath(d) in OWN_PROTECTED or d in SYSTEM_MOUNTS:
+        die(f"{d} is a system folder; changing its owner could break your system, so fstabctl won't do it")
+    if d not in mounted_points():
+        die(f"{d} isn't mounted. Mount it first (fstabctl mount {d}); otherwise the empty folder underneath would change")
+    if e.fstype in WINDOWS_FS:
+        die(f"{d} is {e.fstype}, which can't store Linux owners. Use the mount options instead: "
+            f"fstabctl set {d} --add-options uid={u.pw_uid},gid={u.pw_gid}, then unmount and mount it again")
+    if e.fstype != "auto" and e.fstype not in OWNABLE_FS:
+        die(f"{d} ({e.fstype}) isn't a filesystem fstabctl changes owners on")
+    if u.pw_uid == 0:
+        die("can't tell which user should own it (run it with sudo from your own account)")
+    counts = {"total": 0, "foreign": 0}
+
+    def count(p):
+        counts["total"] += 1
+        try:
+            st = os.lstat(p)
+            if st.st_uid != u.pw_uid or st.st_gid != u.pw_gid:
+                counts["foreign"] += 1
+        except OSError:
+            pass
+    skipped = _own_walk(d, args.recursive, count)
+    scope = "everything on the drive under it" if args.recursive else "the top folder only"
+    print(f"Make {u.pw_name} (uid {u.pw_uid}) the owner of {d}: {scope}.")
+    if args.recursive:
+        print(f"  {counts['total']} item(s), {counts['foreign']} owned by someone else now")
+        for p in skipped:
+            print(f"  skipping {p}: another drive is mounted there")
+    if counts["foreign"] == 0:
+        print(f"Nothing to do: it already belongs to {u.pw_name}.")
+        return
+    print("Permissions (who may read or write) are not changed, only the owner.")
+    if args.dry_run:
+        print("\n(dry run: nothing changed)")
+        return
+    if os.geteuid() != 0:
+        die("changing the owner needs administrator rights; re-run with sudo")
+    if not confirm("\nChange the owner?", args.yes):
+        print("Cancelled.")
+        return
+    res = {"changed": 0, "failed": 0, "err": None}
+
+    def change(p):
+        try:
+            st = os.lstat(p)
+            if st.st_uid == u.pw_uid and st.st_gid == u.pw_gid:
+                return
+            os.lchown(p, u.pw_uid, u.pw_gid)
+            res["changed"] += 1
+        except OSError as ex:
+            res["failed"] += 1
+            res["err"] = res["err"] or ex
+    _own_walk(d, args.recursive, change)
+    print(f"\n✓ {u.pw_name} now owns {res['changed']} item(s) in {d}")
+    if res["failed"]:
+        die(f"{res['failed']} item(s) could not be changed (first error: {res['err']})")
 
 
 def cmd_repair(args):
@@ -1869,6 +1970,11 @@ def build_parser():
     s.add_argument("target", nargs="?", help="mount point, device spec, or # from 'list'")
     s.add_argument("--all", action="store_true", help="every enabled entry that should be mounted but isn't")
     s.add_argument("--expect", metavar="SPEC", help=expect_help)
+
+    s = add("own", cmd_own, "make you the owner of a mounted drive's folder (like chown you:you)")
+    s.add_argument("target", help="mount point, device spec, or # from 'list'")
+    s.add_argument("-R", "--recursive", action="store_true", help="also every file and folder on the drive below it")
+    s.add_argument("--expect", metavar="SPEC", help="only act if this entry's device is still SPEC")
 
     s = add("repair", cmd_repair, "fix a line that can't be read")
     g = s.add_mutually_exclusive_group(required=True)

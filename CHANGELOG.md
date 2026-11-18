@@ -3,6 +3,18 @@
 Versions are per component: **CLI** is `fstabctl` (Python), **GUI** is fstab Manager, `fstab-manager` (Go; called
 `fstabctl-gui` up to 0.3.0).
 
+## 2026-11-18: fstab Manager 0.7.0, fstabctl 0.7.0 (packages -1)
+
+### Added
+- **Take ownership** of a mounted drive, so you can save files on it: a newly formatted drive belongs to root.
+  **Top folder only** works like `sudo chown you:you /mnt/data`; **Everything inside** works like `chown -R`. The
+  preview counts what will change. System folders are refused, unmounted entries are refused (the change would hit the
+  empty folder underneath), other drives mounted inside are skipped, links are never followed, and permissions are
+  never changed. Available on the Mounts tab and from a new Overview warning, "You can't save files on …".
+- For NTFS, exFAT and FAT drives, which can't store owners, the same warning offers **Make me the owner**, which adds
+  `uid=`/`gid=` to the mount options.
+- CLI: `fstabctl own TARGET [-R]`.
+
 ## 2026-11-11: beta packages fstab Manager 0.6.6-2, fstabctl 0.6.1-3
 
 ### Added

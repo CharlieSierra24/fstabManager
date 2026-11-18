@@ -78,6 +78,10 @@ A table of every entry. Option chips show a plain-language explanation when you 
   (`nofail`, `noatime`, `ro`, `noauto`, `_netdev`, `x-systemd.automount`).
 - **Disable / Enable** comments an entry out or brings it back.
 - **Remove** deletes the line (the backup keeps it recoverable).
+- **Take ownership…** (mounted drives) makes your account the owner, so you can save files on a drive that belongs
+  to root, as a newly formatted one does. **Top folder only** is like `sudo chown you:you /mnt/data`; **Everything
+  inside** is like `chown -R`. NTFS, exFAT and FAT drives can't store owners; the Overview offers **Make me the owner**,
+  which adds `uid=`/`gid=` mount options instead.
 - **Mount now** appears on entries that are in fstab but not mounted. It mounts the drive straight away, so you don't
   have to reboot to use it. **Mount all now…** does this for every such entry (skipping disks that aren't connected and
   drives that mount by themselves when opened).

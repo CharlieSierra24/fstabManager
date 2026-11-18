@@ -221,10 +221,34 @@ function findingEl(f){
     f.why?el("div",{class:"detail"},el("b",{},"Why it matters: "),f.why):null,
     f.fix?el("div",{class:"detail"},el("b",{},"What to do: "),f.fix):null,
     (f.actions||[]).length?el("div",{class:"acts"},f.actions.map((a,i)=>btn(a.label+(a.args[0]==="mount"?"":"…"),
-      ()=>a.args[0]==="mount"?mountAction(a.label+": "+a.args.slice(1).join(" "),a.args):runAction(a.label,a.args),i===0?"primary":""))):null);
+      ()=>a.args[0]==="mount"?mountAction(a.label+": "+a.args.slice(1).join(" "),a.args)
+        :a.args[0]==="own"?ownDialog(S.entries.find(x=>String(x.n)===a.args[1])||{file:"",n:a.args[1],spec:a.args[3]})
+        :runAction(a.label,a.args),i===0?"primary":""))):null);
 }
 // Mounting shows what will happen first, like every other change.
 function mountAction(title,args){ runAction(title.startsWith("Mount")?title:"Mount",args); }
+// Filesystems that store Linux owners (chown works); Windows-type ones use uid=/gid= options instead.
+const OWNABLE=new Set(["ext2","ext3","ext4","xfs","btrfs","f2fs","jfs","reiserfs","zfs","tmpfs","bcachefs","nilfs2","auto"]);
+const PROTECTED=new Set(["/","/boot","/boot/efi","/efi","/home","/usr","/var","/etc","/opt","/root","/tmp","/srv","/nix","/snap"]);
+const canOwn=e=>e.status==="mounted"&&!e.system&&e.enabled&&OWNABLE.has(e.fstype)&&!PROTECTED.has(e.file)&&e.file.startsWith("/");
+// Take ownership: the same as `sudo chown [-R] you:you /mnt/data`, previewed first.
+function ownDialog(e){
+  const top=el("input",{type:"radio",name:"ownscope",checked:true}), all=el("input",{type:"radio",name:"ownscope"});
+  const opt=(r,title,hint)=>el("label",{style:"display:flex;gap:8px;align-items:flex-start;margin:4px 0"},r,
+    el("span",{},el("b",{},title),el("div",{class:"small muted"},hint)));
+  const go=btn("Preview…",()=>{
+    const args=["own",String(e.n),...(e.spec?["--expect",e.spec]:[])]; if(all.checked) args.push("--recursive");
+    m.close(); runAction("Take ownership of "+(e.file||"the drive"),args);
+  },"primary");
+  const m=modal("Take ownership of "+(e.file||"this drive"),el("div",{},
+    el("p",{class:"small"},"Make your account the owner, so you can save files there without administrator rights. "+
+      "It does what “sudo chown you:you "+(e.file||"/mnt/data")+"” does (“chown -R” for everything inside); only the owner changes, not who may read or write."),
+    opt(top,"Top folder only (recommended for a new drive)","You can create files and folders in "+(e.file||"it")+". Files already on the drive keep their owners."),
+    opt(all,"Everything inside","Also changes every file and folder already on the drive. Use it for a drive you copied files to as root, or one from another computer. "+
+      "Other drives mounted inside it are skipped."),
+    el("p",{class:"small muted"},"The preview shows how many items will change before anything happens.")),
+    [btn("Cancel",()=>m.close()),go]);
+}
 const mountAll=()=>runAction("Mount all drives now",["mount","--all"]);
 
 /* ---------- splash / about ---------- */
@@ -292,6 +316,7 @@ function viewMounts(){
       el("td",{},el("div",{class:"mono"},e.spec),real),el("td",{class:"mono"},e.file),el("td",{},e.fstype),
       el("td",{},e.help.map(([o,t])=>el("span",{class:"chip",title:t||""},o))),
       el("td",{class:"actions"},canMount?btn("Mount now",()=>runAction("Mount "+e.file,["mount",target,...g]),"primary"):null,
+        canOwn(e)?btn("Take ownership…",()=>ownDialog(e)):null,
         btn("Edit",()=>editDialog(e)),
         btn(e.enabled?"Disable":"Enable",()=>runAction((e.enabled?"Disable ":"Enable ")+e.file,[e.enabled?"disable":"enable",target,...g])," ",e.system&&e.enabled),
         btn("Remove",()=>runAction("Remove "+e.file,["remove",target,...g]),"danger",e.system)));

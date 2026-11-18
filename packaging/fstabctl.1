@@ -69,6 +69,13 @@ that mount on first access (noauto, x\-systemd.automount) and boot\-critical mou
 .B systemctl daemon\-reload
 first on systemd systems. Needs root.
 .TP
+.BI own " TARGET"
+Make you the owner of a mounted drive's folder, like
+.BR "chown you:you" ;
+.B \-R
+also changes everything on the drive below it. Refuses system folders and unmounted entries; skips
+other drives mounted inside; never follows links. Needs root.
+.TP
 .B repair
 Fix a line that can't be read.
 .BI \-\-comment\-out " LINE"

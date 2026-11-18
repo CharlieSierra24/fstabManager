@@ -16,13 +16,13 @@ Both read and write the **same files** (backups, snapshots, export bundles), so 
 **Debian, Ubuntu, Pop!_OS, Linux Mint and derivatives** (built and tested on Ubuntu 24.04; the package also allows Ubuntu 22.04, untested)
 
 ```sh
-sudo apt install ./fstab-manager_0.6.6-2_amd64.deb ./fstabctl_0.6.1-3_all.deb
+sudo apt install ./fstab-manager_0.7.0-1_amd64.deb ./fstabctl_0.7.0-1_all.deb
 ```
 
 **Fedora, RHEL and derivatives, openSUSE**
 
 ```sh
-sudo dnf install ./fstab-manager-0.6.6-2.x86_64.rpm ./fstabctl-0.6.1-3.noarch.rpm
+sudo dnf install ./fstab-manager-0.7.0-1.x86_64.rpm ./fstabctl-0.7.0-1.noarch.rpm
 ```
 
 The two packages are independent: install either or both. The desktop app needs GTK 3 and WebKitGTK 4.1, which the
@@ -86,6 +86,7 @@ Every fix button opens a preview showing the exact change. Nothing happens until
 | Local disk without “nofail” | Note | Add nofail |
 | Uses “discard” | Note | Remove discard |
 | Refers to a disk as `/dev/sdb1` | Note | Switch to UUID |
+| You can't save files on a mounted drive (it belongs to root) | Warning | Take ownership (Linux drives), or Make me the owner (NTFS, exFAT, FAT) |
 
 **nofail** is the most important option to understand. Without it, a disk that's missing at boot makes your computer wait about 90 seconds and then stop at an emergency screen. With it, startup carries on without that disk.
 
@@ -118,6 +119,7 @@ All presets include `nofail`, so a missing disk never stops startup.
 **On each row:**
 
 - **Mount now** appears when an entry isn't mounted. **Mount all now…** at the top does every such entry, skipping disks that aren't connected.
+- **Take ownership…** appears on mounted drives. A newly formatted drive belongs to root, so you can't save files on it; this makes your account the owner, like `sudo chown you:you /mnt/data`. Choose **Top folder only** for a new drive, or **Everything inside** to also change files already on it (like `chown -R`). The preview shows how many items will change. System folders such as `/` and `/home` are refused, and other drives mounted inside are skipped. NTFS, exFAT and FAT drives can't store owners: for those, the Overview offers **Make me the owner**, which adds `uid=`/`gid=` to the mount options.
 - **Edit** changes options, filesystem type or check order, with quick toggles for common options.
 - **Disable** keeps the line but tells the system to ignore it. **Enable** brings it back.
 - **Remove** deletes the line. The automatic backup keeps it recoverable.
@@ -223,6 +225,7 @@ If your username changed, links pointing into your old home folder are adjusted 
 | `sudo fstabctl disable /mnt/usb` / `enable` | Turns an entry off or back on |
 | `sudo fstabctl mount --all` | Mounts everything that should be mounted |
 | `sudo fstabctl repair --comment-out 7` | Comments out a broken line |
+| `sudo fstabctl own /mnt/data` (`-R` for everything inside) | Makes you the owner of a mounted drive |
 | `fstabctl backups` / `sudo fstabctl restore latest` | Lists backups / restores the newest |
 | `fstabctl report -o report.md` | Saves a readable report |
 | `fstabctl export -o bundle.json` | Saves a bundle |

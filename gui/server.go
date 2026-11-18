@@ -21,10 +21,10 @@ import (
 var uiHTML string
 
 var (
-	allowedCmds     = map[string]bool{"add": true, "remove": true, "enable": true, "disable": true, "set": true, "backup": true, "restore": true, "import": true, "diff": true, "mount": true, "repair": true}
+	allowedCmds     = map[string]bool{"add": true, "remove": true, "enable": true, "disable": true, "set": true, "backup": true, "restore": true, "import": true, "diff": true, "mount": true, "repair": true, "own": true}
 	allowedLinkCmds = map[string]bool{"add": true, "set": true, "remove": true, "backup": true, "restore": true, "import": true,
 		"discover": true, "track": true, "untrack": true, "folders": true}
-	privCmds = map[string]bool{"add": true, "remove": true, "enable": true, "disable": true, "set": true, "restore": true, "import": true, "mount": true, "repair": true}
+	privCmds = map[string]bool{"add": true, "remove": true, "enable": true, "disable": true, "set": true, "restore": true, "import": true, "mount": true, "repair": true, "own": true}
 )
 
 // privMethod: how this process can write fstab: "root", "direct", "pkexec", "sudo" or "".

@@ -45,6 +45,7 @@ Without `-y`, a change asks `Apply this change? [y/N]`; when input is not a term
 | `remove TARGET` | `--force` (needed for `/`, `/boot`, `/boot/efi`, `/efi`), `--expect SPEC` |
 | `disable TARGET` / `enable TARGET` | `--force` (to disable a boot-critical mount), `--expect SPEC` |
 | `repair` | `--comment-out LINE` or `--add-defaults LINE` (one is required), `--expect TEXT`. See [Repairs](#repairs) |
+| `own TARGET` | make you the owner of a mounted drive's folder; `-R/--recursive` for everything on the drive below it; `--expect SPEC`. See [Ownership](#ownership) |
 | `restore [BACKUP]` | backup ID, unique ID prefix, `latest`, or a file path; the current file is backed up first |
 | `import BUNDLE` | `--include-system`, `--skip-missing` (see [Import rules](#import-rules)) |
 | `backup` | `--note TEXT`; always creates a backup, even if identical to the last |
@@ -68,6 +69,15 @@ A plan is printed first (`-n` stops there). `--all` skips entries that are disab
 reason. For a single `TARGET`, any of these is an error. Before mounting, `systemctl daemon-reload` runs on systemd
 systems so the mount units match fstab; missing mount point folders are created. Each result is reported as
 `✓ mounted …` or `✗ …: <mount's message>`; exit status 1 if any failed. Needs root.
+
+### Ownership
+
+`own` is `chown you:you DIR` (`-R`: `chown -R`) with safety checks. "You" is the user who ran `sudo` or the app. It
+refuses an entry that is disabled, swap, not mounted (it would change the empty folder underneath), or a system folder
+(`/`, `/boot`, EFI, `/home`, `/usr`, `/var`, `/etc`, `/opt`, `/root`, `/tmp`, `/srv`). It works on filesystems that
+store Linux owners (ext2/3/4, xfs, btrfs, f2fs, jfs, zfs, tmpfs and similar). For NTFS, exFAT and FAT it explains the
+`uid=`/`gid=` mount options instead. Recursive mode never follows links and skips other drives mounted inside.
+Only owners change, never permissions. The app shows a warning when you can't write to a mounted drive.
 
 ### Repairs
 

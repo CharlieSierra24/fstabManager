@@ -125,6 +125,10 @@ func analyze(ents []IdxEntry, devs []Device) []Finding {
 				}})
 		}
 
+		if f := ownershipFinding(n, e, mounted); f != nil {
+			out = append(out, *f)
+		}
+
 		if r != "" && e.Fstype != "swap" && e.File != "none" && !mounted[e.File] && !systemMounts[e.File] &&
 			!e.HasOpt("noauto") && !e.HasOpt("x-systemd.automount") {
 			out = append(out, Finding{Level: "info",

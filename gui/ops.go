@@ -66,6 +66,8 @@ func RunOp(args []string, apply bool, w io.Writer) int {
 		err = c.cmdMount(rest)
 	case "repair":
 		err = c.cmdRepair(rest)
+	case "own":
+		err = c.cmdOwn(rest)
 	default:
 		err = fail("unknown command '%s'", args[0])
 	}
