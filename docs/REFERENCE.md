@@ -79,6 +79,27 @@ store Linux owners (ext2/3/4, xfs, btrfs, f2fs, jfs, zfs, tmpfs and similar). Fo
 `uid=`/`gid=` mount options instead. Recursive mode never follows links and skips other drives mounted inside.
 Only owners change, never permissions. The app shows a warning when you can't write to a mounted drive.
 
+### Swap: `fstabctl swap ACTION`
+
+| Action | Arguments | Does |
+|---|---|---|
+| `list` | | Memory, then each swap area: fstab #, path or device, kind (file, partition, zram), size, used, state |
+| `create` | `PATH --size SIZE [--priority N]` | Makes a swap file (fallocate, or `btrfs filesystem mkswapfile` / `chattr +C` on btrfs), mode 0600, `mkswap`, appends `PATH none swap sw[,pri=N] 0 0`, `swapon` |
+| `resize` | `TARGET --size SIZE [--expect SPEC]` | Swap files only: `swapoff`, recreate at the new size with the same UUID (`mkswap -U`), `swapon`. If recreating fails, the old size is put back |
+| `remove` | `TARGET [--keep-file] [--expect SPEC]` | `swapoff`, removes the fstab entry, deletes the file (only if it has a swap signature) |
+| `on` / `off` | `TARGET [--expect SPEC]` | `swapon` / `swapoff` now; fstab doesn't change |
+| `setup` | `DEVICE [--erase] [--priority N]` | Partition (or LVM/crypt volume): `mkswap` unless it's already swap, appends `UUID=… none swap sw 0 0`, `swapon` |
+
+TARGET is a swap file path, a device, or the fstab `#` shown by `swap list`. SIZE is a number with K, M, G or T
+(`4G`, `512M`, `1.5G`), at least 128 MiB, in whole MiB.
+
+Refusals: swap files outside ext2/3/4, xfs and btrfs; paths under `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/boot`,
+`/etc`, `/usr`, `/bin`, `/sbin`, `/lib*`, `/snap`, `/var/tmp`; an existing file; less than SIZE + 2 GiB free;
+turning off swap whose used amount + 256 MiB exceeds MemAvailable; resizing a partition or zram; removing zram;
+deleting a file without a swap signature; `setup` on a mounted, active, in-fstab, whole-disk, LVM/RAID/LUKS member
+or held device, or on one holding a filesystem without `--erase`. Hibernation (from `/sys/power/resume`) to the
+area being resized or removed prints a warning. Swap commands don't print the `mount -a` hint.
+
 ### Repairs
 
 `repair` only touches a line that can't be read (wrong number of fields, non-numeric dump/pass), and refuses any other line.
@@ -156,7 +177,7 @@ The app opens its own window (Wails on WebKitGTK 4.1). It opens no network port.
 brings the existing window forward. `fstabctl-gui` is installed as a link to `fstab-manager` for compatibility.
 
 The app supports these operations (the same verbs as the CLI): `add`, `remove`, `enable`, `disable`, `set`, `mount`,
-`repair`, `backup`, `diff`, `restore`, `import`, and `link add|set|remove|backup|restore|import|discover|track|untrack|folders`. The interactive wizard,
+`repair`, `own`, `swap`, `backup`, `diff`, `restore`, `import`, and `link add|set|remove|backup|restore|import|discover|track|untrack|folders`. The interactive wizard,
 `verify`, `scan` and `list` are covered by the Overview, Disks and Mounts pages instead. Reports and bundles are saved with
 the system's Save dialog, which opens in your Downloads folder (from `~/.config/user-dirs.dirs`, else `~/Downloads`);
 bundles to import are chosen with the system's Open dialog.

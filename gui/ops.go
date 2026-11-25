@@ -16,6 +16,8 @@ import (
 type Ctx struct {
 	w     io.Writer
 	apply bool // false = preview (dry run), true = write
+	// quietNext: leave out writeFstab's "daemon-reload / mount -a" advice (swap commands finish the job themselves)
+	quietNext bool
 }
 
 func (c *Ctx) pf(f string, a ...any) { fmt.Fprintf(c.w, f, a...) }
@@ -68,6 +70,8 @@ func RunOp(args []string, apply bool, w io.Writer) int {
 		err = c.cmdRepair(rest)
 	case "own":
 		err = c.cmdOwn(rest)
+	case "swap":
+		err = c.cmdSwap(rest)
 	default:
 		err = fail("unknown command '%s'", args[0])
 	}
@@ -304,7 +308,14 @@ func (c *Ctx) writeFstab(newText, note string, post func()) error {
 			o, e, _ := runCmd("findmnt", "--verify", "--tab-file", t.Name())
 			os.Remove(t.Name())
 			var notes []string
+			target := ""
 			for _, l := range strings.Split(o+e, "\n") {
+				if l != "" && l[0] != ' ' && l[0] != '\t' {
+					target = strings.TrimSpace(l) // findmnt groups its notes under each mount point
+				}
+				if target == "none" || target == "swap" {
+					continue // swap lines: findmnt doesn't understand swap files; the Swap tab reports missing swap
+				}
 				if strings.Contains(l, "[E]") || strings.Contains(l, "[W]") {
 					notes = append(notes, "  "+strings.TrimSpace(l))
 				}
@@ -337,8 +348,10 @@ func (c *Ctx) writeFstab(newText, note string, post func()) error {
 	if post != nil {
 		post()
 	}
-	c.pl("Next: 'sudo systemctl daemon-reload' (systemd distros), then 'sudo mount -a' to test.")
-	c.pf("Undo any time with: fstabctl restore %s\n", b.ID)
+	if !c.quietNext {
+		c.pl("Next: 'sudo systemctl daemon-reload' (systemd distros), then 'sudo mount -a' to test.")
+	}
+	c.pf("Undo the fstab change any time with: fstabctl restore %s\n", b.ID)
 	return nil
 }
 

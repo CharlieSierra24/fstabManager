@@ -16,13 +16,13 @@ Both read and write the **same files** (backups, snapshots, export bundles), so 
 **Debian, Ubuntu, Pop!_OS, Linux Mint and derivatives** (built and tested on Ubuntu 24.04; the package also allows Ubuntu 22.04, untested)
 
 ```sh
-sudo apt install ./fstab-manager_0.7.1-1_amd64.deb ./fstabctl_0.7.0-1_all.deb
+sudo apt install ./fstab-manager_0.8.0-1_amd64.deb ./fstabctl_0.8.0-1_all.deb
 ```
 
 **Fedora, RHEL and derivatives, openSUSE**
 
 ```sh
-sudo dnf install ./fstab-manager-0.7.1-1.x86_64.rpm ./fstabctl-0.7.0-1.noarch.rpm
+sudo dnf install ./fstab-manager-0.8.0-1.x86_64.rpm ./fstabctl-0.8.0-1.noarch.rpm
 ```
 
 The two packages are independent: install either or both. The desktop app needs GTK 3 and WebKitGTK 4.1, which the
@@ -54,13 +54,14 @@ The header shows your computer's name, its system and the fstab file in use, plu
 - **● watching disks**: drive detection is running, so plugged-in drives are noticed.
 - **changes ask for your password**: how changes get administrator rights. If it says **read-only**, see *If something goes wrong*.
 
-Six tabs sit under the header:
+Seven tabs sit under the header:
 
 | Tab | Use it to |
 | --- | --- |
 | Overview | See counts, findings with one-click fixes, and disks not yet in fstab |
 | Mounts | Add, edit, mount, disable or remove fstab entries |
 | Disks | See every disk and partition: size, filesystem, label, UUID, where it's mounted |
+| Swap | Add, resize, turn on or off and remove swap files; use a partition as swap |
 | Home links | Link your key folders elsewhere, manage links, discover links |
 | Backups | Compare and restore earlier versions of fstab and of your links |
 | Export / Import | Save a report or bundle, and import a bundle on a new install |
@@ -87,6 +88,8 @@ Every fix button opens a preview showing the exact change. Nothing happens until
 | Uses “discard” | Note | Remove discard |
 | Refers to a disk as `/dev/sdb1` | Note | Switch to UUID |
 | You can't save files on a mounted drive (it belongs to root) | Warning | Take ownership (Linux drives), or Make me the owner (NTFS, exFAT, FAT) |
+| A swap file or swap disk in fstab isn't there | Warning | Remove entry |
+| No swap is turned on | Note | Add a swap file |
 
 **nofail** is the most important option to understand. Without it, a disk that's missing at boot makes your computer wait about 90 seconds and then stop at an emergency screen. With it, startup carries on without that disk.
 
@@ -139,7 +142,23 @@ While the app is open, plugging in a drive shows a notice at the top right withi
 | New disk without a filesystem | Format it first (for example with GNOME Disks); it's announced again afterwards |
 | Disk removed | Nothing, unless it was in use; the notice says if it's still listed in fstab |
 
-fstab Manager doesn't format or partition drives.
+fstab Manager doesn't format or partition drives. The one exception: on the Swap tab you can turn a partition you choose into swap.
+
+## Swap
+
+Swap is disk space the system uses when memory is full. Without it, running out of memory closes programs instead of slowing them down. The Swap tab shows your memory, how much swap is on and in use, and every swap area: swap files, swap partitions, and compressed swap in memory (zram), which your system manages itself.
+
+- **Add a swap file…** makes the file, sets it up as swap, adds it to fstab and turns it on. `/swapfile` is suggested; the size chips offer common sizes and your memory size, which is what you need to hibernate. Most computers do well with 4–8 GiB.
+- **Resize…** turns a swap file off, makes it again at the new size (keeping its UUID) and turns it back on. fstab doesn't change.
+- **Turn off** / **Turn on** last until the next restart.
+- **Remove…** turns the swap off, takes it out of fstab and deletes a swap file. A partition is left as it is.
+- **Use a partition…** adds an unused partition as swap. If it holds a filesystem, it's erased, and you must tick a box to confirm.
+
+Every change shows a preview first. Swap files must be on an ext4, xfs or btrfs drive, and 2 GiB is always left free. Turning swap off is refused if what's stored in it wouldn't fit in free memory. If your computer hibernates to a swap area, resizing or removing it shows a warning, because the hibernation settings then need updating.
+
+A swap partition's size can only be changed by repartitioning, with KDE Partition Manager or GParted from a live USB. Adding a swap file is the easy way to get more swap.
+
+![The Swap tab: memory and swap at a glance, and a swap file with Resize, Turn off and Remove](docs/images/swap.png)
 
 ## Home links
 
@@ -226,6 +245,11 @@ If your username changed, links pointing into your old home folder are adjusted 
 | `sudo fstabctl mount --all` | Mounts everything that should be mounted |
 | `sudo fstabctl repair --comment-out 7` | Comments out a broken line |
 | `sudo fstabctl own /mnt/data` (`-R` for everything inside) | Makes you the owner of a mounted drive |
+| `fstabctl swap list` | Shows swap areas, their size and use |
+| `sudo fstabctl swap create /swapfile --size 4G` | Makes a swap file, adds it to fstab and turns it on |
+| `sudo fstabctl swap resize /swapfile --size 8G` | Changes a swap file's size |
+| `sudo fstabctl swap remove /swapfile` | Turns swap off, takes it out of fstab and deletes the file |
+| `sudo fstabctl swap setup /dev/sdb2` (`--erase` if it holds a filesystem) | Uses a partition as swap |
 | `fstabctl backups` / `sudo fstabctl restore latest` | Lists backups / restores the newest |
 | `fstabctl report -o report.md` | Saves a readable report |
 | `fstabctl export -o bundle.json` | Saves a bundle |
@@ -257,7 +281,7 @@ If you can't log in at all, start from a live USB, mount your system partition, 
 | --- | --- |
 | The header says **read-only** | The app can't ask for your password. Install polkit (`pkexec`), then reopen the app; or use `sudo fstabctl` |
 | No password prompt appears | Your desktop needs a polkit agent running; GNOME, KDE and COSMIC include one |
-| The window is blank | Run `WEBKIT_DISABLE_DMABUF_RENDERER=1 fstab-manager` from a terminal. With NVIDIA's driver the app already does this |
+| The window is blank, or closes right after opening (“Error 71 (Protocol error) dispatching to Wayland display”) | Update to 0.7.1 or later, which turns off the WebKit features behind this. On an older version, run `WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 fstab-manager` |
 | Mount now fails with “wrong fs type” | The filesystem type or an option doesn't suit the disk. Check the Disks tab and fix it with **Edit** |
 | Mount now fails with “unknown filesystem type” | Install the driver, for example `exfatprogs`, `ntfs-3g`, `nfs-common` or `cifs-utils` |
 | A fix button says fstab has changed | fstab was edited after the page loaded. Switch tabs and back, then use the new button |
@@ -297,7 +321,7 @@ Installed packages put these under `/usr/share/doc/fstab-manager/` (or `fstabctl
 - Linux only (fstab does not exist in this form elsewhere). The app was exercised on x86-64 Ubuntu 24.04 in a virtual
   display; it has not yet been run on a real desktop session, on ARM, or through a reboot.
 - Not managed: `/etc/crypttab` (encrypted drives), LVM/RAID setup, btrfs subvolume creation, formatting or
-  partitioning. Existing entries for these are shown and preserved.
+  partitioning (except setting up a partition as swap), resizing swap partitions, zram settings. Existing entries for these are shown and preserved.
 - The polkit password dialog and desktop notifications depend on your desktop session and have not been tested
   on every environment. See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 - Always look at the diff before applying, and keep a rescue plan for boot-critical changes.

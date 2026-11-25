@@ -3,6 +3,25 @@
 Versions are per component: **CLI** is `fstabctl` (Python), **GUI** is fstab Manager, `fstab-manager` (Go; called
 `fstabctl-gui` up to 0.3.0).
 
+## 2026-11-25: fstab Manager 0.8.0, fstabctl 0.8.0 (packages -1)
+
+### Added
+- **Swap** tab: memory and swap at a glance, and every swap area (swap files, swap partitions, zram).
+  - **Add a swap file…**: makes it, sets it up, adds it to fstab and turns it on. Size chips include your memory size,
+    for hibernation.
+  - **Resize…** a swap file: off, recreated at the new size with the same UUID, back on.
+  - **Turn off / Turn on** until the next restart, and **Remove…** (off, out of fstab, file deleted).
+  - **Use a partition…** as swap; one holding a filesystem is erased only after you tick a confirmation box.
+  - Safety: ext4, xfs and btrfs only (btrfs files without copy-on-write), never in system folders, 2 GiB always left
+    free; turning off is refused when the swapped-out data wouldn't fit in memory; hibernation is warned about; files
+    without a swap signature are never deleted. Swap partitions can't be resized (that needs repartitioning).
+- Overview: "Swap file … isn't there" (Remove entry) and "This computer has no swap turned on" (Add a swap file).
+- CLI: `fstabctl swap list|create|resize|remove|on|off|setup`.
+
+### Changed
+- findmnt's advisory notes leave out swap lines, which it misreads (swap files show as "unreachable" or "a regular file").
+- After an fstab change, the message reads "Undo the fstab change any time with: …".
+
 ## 2026-11-24: fstab Manager 0.7.1 (package -1)
 
 ### Fixed

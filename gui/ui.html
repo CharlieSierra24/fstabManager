@@ -43,6 +43,10 @@ button.btnchip{cursor:pointer}button.btnchip:hover{border-color:var(--accent)}
 .btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
 .btn.danger{color:var(--bad)}.btn:disabled{opacity:.45;cursor:not-allowed}
 td.actions{white-space:nowrap}td.actions .btn{margin-right:5px;padding:3px 9px;font-size:12.5px}
+.meter{display:block;height:6px;border-radius:3px;background:var(--offbg);margin-top:4px;min-width:70px;overflow:hidden}
+.meter i{display:block;height:100%;background:var(--accent,#2f6fdf)}
+.erase{padding:10px 12px;border-radius:10px;background:var(--badbg);color:var(--bad);margin:8px 0;font-size:13px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .banner{padding:10px 14px;border-radius:10px;margin-bottom:16px;background:var(--warnbg);color:var(--warn);border:1px solid var(--line)}
 .finding{display:flex;border-bottom:1px solid var(--line)}.finding:last-child{border:0}
 .overlay{position:fixed;inset:0;background:var(--overlay);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);display:flex;align-items:flex-start;justify-content:center;padding:6vh 14px;overflow:auto;z-index:30}
@@ -123,7 +127,7 @@ header img{width:26px;height:26px;display:block}
 <main id="main">Loading…</main>
 <script>
 "use strict";
-const TABS=[["overview","Overview"],["mounts","Mounts"],["disks","Disks"],["links","Home links"],["backups","Backups"],["transfer","Export / Import"]];
+const TABS=[["overview","Overview"],["mounts","Mounts"],["disks","Disks"],["swap","Swap"],["links","Home links"],["backups","Backups"],["transfer","Export / Import"]];
 let S=null, tab=(location.hash||"#overview").slice(1), linkOpts={depth:1,hidden:false};
 if(!TABS.some(t=>t[0]===tab)) tab="overview";
 
@@ -222,6 +226,7 @@ function findingEl(f){
     f.fix?el("div",{class:"detail"},el("b",{},"What to do: "),f.fix):null,
     (f.actions||[]).length?el("div",{class:"acts"},f.actions.map((a,i)=>btn(a.label+(a.args[0]==="mount"?"":"…"),
       ()=>a.args[0]==="mount"?mountAction(a.label+": "+a.args.slice(1).join(" "),a.args)
+        :a.args[0]==="swap"&&a.args[1]==="create"?swapFileDialog()
         :a.args[0]==="own"?ownDialog(S.entries.find(x=>String(x.n)===a.args[1])||{file:"",n:a.args[1],spec:a.args[3]})
         :runAction(a.label,a.args),i===0?"primary":""))):null);
 }
@@ -333,6 +338,110 @@ function viewDisks(){
     el("td",{class:"actions"},d.candidate&&!d.in_fstab?btn("Add…",()=>addDialog(d),"primary"):null)));
   return el("div",{},el("div",{class:"toolbar"},el("h2",{},"Disks & partitions"),el("span",{class:"grow"}),btn("Refresh",load)),
     rows.length?tableEl(["Device","Size","Type","FS","Label","UUID","Mounted at","fstab",""],rows):el("p",{class:"muted"},"lsblk returned nothing."));
+}
+
+/* ---------- swap ---------- */
+const GiB=1073741824, MiB=1048576;
+const hsize=n=>n>=GiB?(Math.round(n/GiB*10)/10)+" GiB":Math.round(n/MiB)+" MiB";
+const SWAP_PILL={on:"ok",off:"warn",missing:"bad",disabled:"off"};
+const swapState=it=>it.missing?"missing":it.active?"on":(!it.enabled&&it.entry)?"disabled":"off";
+const swapTarget=it=>it.entry?String(it.entry):it.name;
+const swapGuard=it=>it.entry?["--expect",it.spec]:[];
+const KIND_LABEL={file:"swap file",partition:"partition",zram:"compressed, in memory (zram)"};
+function swapSizes(){
+  // common choices, plus the memory size (enough to hibernate)
+  const mem=Math.max(1,Math.round(S.swap.mem_total/GiB));
+  return [...new Set([2,4,8,16,mem].filter(g=>g<=64))].sort((a,b)=>a-b);
+}
+function sizeChooser(start,free){
+  const input=el("input",{class:"mono",value:start,style:"width:110px"});
+  const mem=Math.round(S.swap.mem_total/GiB);
+  const chips=el("div",{class:"chips"},swapSizes().map(g=>el("button",{class:"chip btnchip",type:"button",
+    title:g===mem?"Your memory size: enough to hibernate":"",onclick:()=>{input.value=g+"G";}},g+" GiB"+(g===mem?" (= memory)":""))));
+  const hint=el("div",{class:"hint"},"Write sizes like 4G or 512M. Most computers do well with 4–8 GiB; to hibernate, use at least your memory size ("+hsize(S.swap.mem_total)+")."+
+    (free!=null?" "+hsize(free)+" is free there; 2 GiB is always left free.":""));
+  return {input,box:el("div",{},input,chips,hint)};
+}
+function swapFileDialog(){
+  const path=el("input",{class:"wide mono",value:S.swap.suggest||"/swapfile"});
+  const sz=sizeChooser("4G",S.swap.root_free);
+  const browse=btn("Browse…",async()=>{
+    if(!native()) return toast("Browsing needs the fstab Manager window",true);
+    try{ const d=await native().ChooseFolder("Folder for the swap file","/"); if(d) path.value=d.replace(/\/+$/,"")+"/swapfile"; }catch(e){ toast(String(e),true); }
+  }); browse.title="Choose the folder (the file is named swapfile)";
+  const go=btn("Preview…",()=>{
+    const p=path.value.trim(), s=sz.input.value.trim();
+    if(!p) return toast("Enter where the swap file goes",true); if(!s) return toast("Choose a size",true);
+    m.close(); runAction("Add a swap file",["swap","create",p,"--size",s]);
+  },"primary");
+  const m=modal("Add a swap file",el("div",{class:"form"},
+    field("File",el("div",{class:"pickrow"},path,browse),el("div",{class:"hint"},"Usually at the top of the system drive. It must be on an ext4, xfs or btrfs drive that is mounted at startup.")),
+    field("Size",sz.box)),
+    [btn("Cancel",()=>m.close()),go]);
+}
+function swapResizeDialog(it){
+  const sz=sizeChooser(Math.round(it.size/GiB*10)/10+"G",it.free+it.size);
+  const go=btn("Preview…",()=>{
+    const s=sz.input.value.trim(); if(!s) return toast("Choose a size",true);
+    m.close(); runAction("Resize "+it.name,["swap","resize",swapTarget(it),"--size",s,...swapGuard(it)]);
+  },"primary");
+  const m=modal("Resize "+it.name,el("div",{class:"form"},
+    field("Now",el("div",{},hsize(it.size)+(it.active?", "+hsize(it.used)+" in use":", off"))),
+    field("New size",sz.box)),
+    [btn("Cancel",()=>m.close()),go]);
+}
+function swapPartitionDialog(){
+  const busy=new Set(S.swap.items.filter(i=>i.active||i.entry).map(i=>i.name));
+  const NONFS=new Set(["LVM2_member","crypto_LUKS","linux_raid_member","zfs_member","ceph_bluestore","BitLocker"]);
+  const parts=S.devices.filter(d=>["part","lvm","crypt"].includes(d.type)&&!d.mounts.length&&!busy.has(d.path)&&!NONFS.has(d.fstype)
+    &&!(d.fstype==="swap"&&d.in_fstab));
+  if(!parts.length){
+    const m0=modal("Use a partition as swap",el("p",{},"There's no unused partition. A partition must not be mounted or in use. To make one, shrink another partition with KDE Partition Manager or GParted, or add a swap file instead."),[btn("Close",()=>m0.close())]);
+    return;
+  }
+  const sel=el("select",{},parts.map(d=>el("option",{value:d.path},`${d.path} – ${d.size} ${d.fstype||"empty"}${d.label?` “${d.label}”`:""}${d.model?" · "+d.model:""}`)));
+  const ok=el("input",{type:"checkbox"}), warn=el("div",{});
+  const go=btn("Preview…",()=>{
+    const d=parts.find(x=>x.path===sel.value), erase=d.fstype&&d.fstype!=="swap";
+    if(erase&&!ok.checked) return toast("Tick the box to confirm erasing it",true);
+    m.close(); runAction("Use "+d.path+" as swap",["swap","setup",d.path,...(erase?["--erase"]:[])]);
+  },"primary");
+  function sync(){
+    const d=parts.find(x=>x.path===sel.value); ok.checked=false;
+    warn.replaceChildren(d.fstype==="swap"?el("div",{class:"hint"},"It's already a swap partition; it will be added to fstab and turned on."):
+      !d.fstype?el("div",{class:"hint"},"It's empty; it will be set up as swap, added to fstab and turned on."):
+      el("div",{class:"erase"},el("b",{},"Everything on "+d.path+" will be erased. "),`It holds a ${d.fstype} filesystem${d.label?" (“"+d.label+"”)":""}.`,
+        el("label",{style:"display:flex;gap:8px;margin-top:8px;color:inherit"},ok,"Erase it and use it as swap")));
+  }
+  sel.addEventListener("change",sync); sync();
+  const m=modal("Use a partition as swap",el("div",{class:"form"},field("Partition",sel,warn)),[btn("Cancel",()=>m.close()),go]);
+}
+function viewSwap(){
+  const sw=S.swap, items=sw.items||[];
+  const total=items.filter(i=>i.active).reduce((a,i)=>a+i.size,0), used=items.reduce((a,i)=>a+(i.active?i.used:0),0);
+  const wrap=el("div",{},el("div",{class:"cards"},[["Memory",hsize(sw.mem_total)],["Free memory",hsize(sw.mem_available)],
+    ["Swap on",total?hsize(total):"none"],["Swap in use",hsize(used)]].map(([k,v])=>el("div",{class:"stat"},el("b",{},v),el("span",{},k)))));
+  const rows=items.map(it=>{
+    const st=swapState(it), t=swapTarget(it), g=swapGuard(it), zram=it.kind==="zram";
+    const sub=el("div",{class:"small muted"},KIND_LABEL[it.kind]||it.kind,it.entry?"":" · not in fstab",it.hibernate?" · used for hibernation":"");
+    const pct=it.active&&it.size?Math.min(100,Math.round(it.used/it.size*100)):0;
+    return el("tr",{class:st==="disabled"?"dim":""},el("td",{},el("span",{class:"pill "+SWAP_PILL[st]},st)),
+      el("td",{},el("div",{class:"mono"},it.name),sub),el("td",{},it.size?hsize(it.size):"–"),
+      el("td",{},it.active?[hsize(it.used),el("span",{class:"meter"},el("i",{style:"width:"+pct+"%"}))]:"–"),
+      el("td",{},it.active?String(it.priority):"–"),
+      el("td",{class:"actions"},zram?el("span",{class:"small muted"},"managed by your system"):[
+        it.kind==="file"&&!it.missing?btn("Resize…",()=>swapResizeDialog(it),"primary"):null,
+        !it.missing?btn(it.active?"Turn off":"Turn on",()=>runAction((it.active?"Turn off ":"Turn on ")+it.name,["swap",it.active?"off":"on",t,...g])):null,
+        btn("Remove…",()=>runAction("Remove swap "+it.name,["swap","remove",t,...g]),"danger")]));
+  });
+  wrap.append(el("div",{class:"toolbar"},el("h2",{},"Swap"),el("span",{class:"grow"}),
+    btn("Use a partition…",swapPartitionDialog),btn("Add a swap file…",swapFileDialog,"primary")));
+  wrap.append(rows.length?tableEl(["Status","Swap","Size","Used","Priority",""],rows):
+    el("p",{class:"muted"},"This computer has no swap. Without it, running out of memory closes programs instead of slowing down. Add a swap file to fix that."));
+  wrap.append(el("p",{class:"muted small"},"Swap is disk space the system uses when memory is full. “Turn off” and “Turn on” last until the next restart; "+
+    "Add, Resize and Remove also update fstab. A swap partition's size can only be changed by repartitioning (KDE Partition Manager or GParted); "+
+    "adding a swap file is the easy way to get more."));
+  return wrap;
 }
 
 const KF_STATE={link:"",empty:"Empty folder on this computer",missing:"Doesn’t exist yet",other:""};
@@ -652,7 +761,7 @@ function render(){
   TABS.forEach(([id,label])=>nav.append(el("button",{class:id===tab?"on":"",onclick:()=>{tab=id;location.hash=id;render();}},label)));
   const main=document.getElementById("main"); main.textContent="";
   if(!pm) main.append(el("div",{class:"banner"},"Read-only: fstab Manager can't ask for administrator rights on this system. Install polkit (the package that provides ",el("code",{},"pkexec"),") and reopen the app, or make changes with ",el("code",{},"sudo fstabctl"),". Home links still work."));
-  main.append({overview:viewOverview,mounts:viewMounts,disks:viewDisks,links:viewLinks,backups:viewBackups,transfer:viewTransfer}[tab]());
+  main.append({overview:viewOverview,mounts:viewMounts,disks:viewDisks,swap:viewSwap,links:viewLinks,backups:viewBackups,transfer:viewTransfer}[tab]());
 }
 document.getElementById("helpbtn").addEventListener("click",()=>showAbout(false));
 showAbout(true);

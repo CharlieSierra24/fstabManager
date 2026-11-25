@@ -64,13 +64,16 @@ minimal window managers may not). Check with `pgrep -a polkit`. Install and auto
 - **Missing libraries** (`error while loading shared libraries: libwebkit2gtk-4.1.so.0`): install WebKitGTK 4.1
   (`libwebkit2gtk-4.1-0` on Debian/Ubuntu/Pop!_OS, `webkit2gtk4.1` on Fedora). Installing the package with `apt`/`dnf`
   does this for you.
-- **Blank or white window.** This is usually a graphics-driver problem in WebKitGTK. With NVIDIA's proprietary driver the
-  app already applies the standard fix. Otherwise, try:
+- **Closes right after opening, or a blank window.** A terminal shows
+  `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland display` (seen on KDE Plasma, Kubuntu 26.04).
+  This is WebKitGTK's graphics path. Since 0.7.1 the app turns off the features behind it
+  (`WEBKIT_DISABLE_DMABUF_RENDERER=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1`) on every system. If it still happens, try
+  the X11 display path:
   ```sh
-  WEBKIT_DISABLE_DMABUF_RENDERER=1 fstab-manager
-  WEBKIT_DISABLE_COMPOSITING_MODE=1 fstab-manager     # if the first doesn't help
+  GDK_BACKEND=x11 fstab-manager
   ```
-  If one works, you can add it to the `Exec=` line of a copy of the launcher in `~/.local/share/applications/`.
+  If that works, add it to the `Exec=` line of a copy of the launcher in `~/.local/share/applications/`. Setting either
+  WEBKIT_ variable yourself (to 0, say) overrides the app's choice.
 - **Nothing happens when you start it again**: only one window runs at a time; look for the existing window (it is
   brought forward, but some desktops only flash its taskbar entry).
 - Under `sudo` without a desktop session the window cannot open. Run it as your normal user.

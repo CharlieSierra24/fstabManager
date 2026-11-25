@@ -76,6 +76,25 @@ Make you the owner of a mounted drive's folder, like
 also changes everything on the drive below it. Refuses system folders and unmounted entries; skips
 other drives mounted inside; never follows links. Needs root.
 .TP
+.BI swap " ACTION"
+Swap files and partitions.
+.B list
+shows them;
+.BI create " PATH " \-\-size " SIZE"
+makes a swap file, adds it to fstab and turns it on;
+.BI resize " TARGET " \-\-size " SIZE"
+recreates a swap file at a new size, keeping its UUID;
+.BI remove " TARGET"
+turns swap off, removes it from fstab and deletes a swap file
+.RB ( \-\-keep\-file
+keeps it);
+.BR on " and " off
+change it until the next restart;
+.BI setup " DEVICE"
+uses a partition as swap
+.RB ( \-\-erase
+if it holds a filesystem). SIZE is like 4G or 512M. Needs root, except list.
+.TP
 .B repair
 Fix a line that can't be read.
 .BI \-\-comment\-out " LINE"

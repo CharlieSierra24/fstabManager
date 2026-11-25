@@ -126,6 +126,24 @@ Detection checks every two seconds and waits for the system to finish setting th
 
 All disks and partitions as `lsblk` sees them, with size, filesystem, label, UUID, where mounted, and whether each is in fstab.
 
+### Swap
+
+Memory and swap at a glance, then every swap area: swap files, swap partitions, and zram (compressed swap in memory,
+managed by the system and shown read-only).
+
+- **Add a swap file…**: path (default `/swapfile`) and size (chips for 2/4/8/16 GiB and your memory size). It makes the
+  file (mode 0600), runs `mkswap`, adds `PATH none swap sw 0 0` to fstab and turns it on.
+- **Resize…** (swap files): off, recreate at the new size keeping the UUID, back on. fstab doesn't change.
+- **Turn off / Turn on**: until the next restart. Use Disable on the Mounts tab to keep it off after restarts.
+- **Remove…**: off, out of fstab, and the file deleted (only if it has a swap signature). Partitions are left as they are.
+- **Use a partition…**: an unmounted, unused partition. An empty one or an existing swap partition is just added; one
+  holding a filesystem is erased only after you tick the confirmation box.
+
+Safety: swap files only on ext4, xfs or btrfs (btrfs files are made with copy-on-write off), never in system folders,
+and 2 GiB always stays free. Turning swap off is refused when its contents wouldn't fit in free memory. Hibernation to
+the area being resized or removed is warned about. Swap partitions can't be resized here: use a partition editor, or
+add a swap file.
+
 ### Home links
 
 The page has three parts.
@@ -224,6 +242,17 @@ sudo fstabctl mount --all
 fstabctl verify                        # lists lines that can't be read, with their line numbers
 sudo fstabctl repair --add-defaults 7  # complete "UUID=… /mnt/x ext4" with "defaults,nofail 0 0"
 sudo fstabctl repair --comment-out 7   # or put a # in front of it
+```
+
+### Swap
+
+```sh
+fstabctl swap list                              # memory, swap areas, size, use
+sudo fstabctl swap create /swapfile --size 4G   # make, add to fstab, turn on
+sudo fstabctl swap resize /swapfile --size 8G   # off, recreate (same UUID), on
+sudo fstabctl swap off /swapfile                # until the next restart (also: on)
+sudo fstabctl swap remove /swapfile             # off, out of fstab, delete (--keep-file keeps it)
+sudo fstabctl swap setup /dev/sdb2 --erase      # use a partition as swap (--erase if it holds a filesystem)
 ```
 
 ### Backups

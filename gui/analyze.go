@@ -104,6 +104,19 @@ func analyze(ents []IdxEntry, devs []Device) []Finding {
 					"boot will stop in an emergency shell.",
 				Fix: "Don't reboot yet. Compare the UUID with the Disks tab (or “lsblk -f”) and correct it with Edit, " +
 					"or restore a recent backup from the Backups tab."})
+		case r == "" && e.Fstype == "swap":
+			what := "disk"
+			if isSwapFileSpec(e.Spec) {
+				what = "file"
+			}
+			out = append(out, Finding{Level: "warn",
+				Text: fmt.Sprintf("Swap %s %s isn't there", what, e.Spec),
+				Why: "The system can't use this swap. If it's a disk that isn't connected, startup may wait for it " +
+					"(about 90 seconds without “nofail”) before carrying on without it.",
+				Fix: "Remove the entry on the Swap tab if it's gone for good. If you still want swap, add a swap file there.",
+				Actions: []FindingAction{
+					{"Remove entry", []string{"swap", "remove", strconv.Itoa(n), "--expect", e.Spec}},
+				}})
 		case r == "" && !nofail:
 			advisedNofail = true
 			out = append(out, Finding{Level: "warn",

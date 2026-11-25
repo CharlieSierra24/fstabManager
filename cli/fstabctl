@@ -45,7 +45,7 @@ import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 FSTAB_PATH = Path("/etc/fstab")
 DISABLED_MARK = "#fstabctl-disabled#"
 SYSTEM_MOUNTS = {"/", "/boot", "/boot/efi", "/efi"}
@@ -370,12 +370,16 @@ def status_of(e, mounted, swaps):
 def lsblk():
     base = "NAME,PATH,TYPE,SIZE,FSTYPE,LABEL,UUID,PARTUUID,MODEL,ROTA,RM"
     r = None
-    for mp in ("MOUNTPOINTS", "MOUNTPOINT"):
-        r = run(["lsblk", "-J", "-o", f"{base},{mp}"])
-        if r.returncode == 0 and r.stdout:
-            break
+    hook = os.environ.get("FSTABCTL_LSBLK_JSON")  # testing hook: read lsblk -J output from a file
+    if hook and os.path.exists(hook):
+        r = subprocess.CompletedProcess([], 0, Path(hook).read_text(), "")
     else:
-        return []
+        for mp in ("MOUNTPOINTS", "MOUNTPOINT"):
+            r = run(["lsblk", "-J", "-o", f"{base},{mp}"])
+            if r.returncode == 0 and r.stdout:
+                break
+        else:
+            return []
     out = []
 
     def truthy(v):
@@ -516,8 +520,9 @@ def show_diff(old, new, a="current", b="proposed"):
     return bool(d)
 
 
-def write_fstab(new_text, note, args, post=None):
-    """Validate -> diff -> confirm -> backup -> atomic write. Returns True if written."""
+def write_fstab(new_text, note, args, post=None, show=True, quiet_next=False):
+    """Validate -> diff -> confirm -> backup -> atomic write. Returns True if written.
+    show=False: the caller already showed the diff and asked (swap commands)."""
     old = read_fstab()
     if not new_text.endswith("\n"):
         new_text += "\n"
@@ -532,23 +537,15 @@ def write_fstab(new_text, note, args, post=None):
         for e in errors:
             print(f"  - {e}", file=sys.stderr)
         sys.exit(2)
-    show_diff(old, new_text)
-    if shutil.which("findmnt"):
-        with tempfile.NamedTemporaryFile("w", suffix=".fstab", delete=False) as t:
-            t.write(new_text)
-        r = run(["findmnt", "--verify", "--tab-file", t.name])
-        os.unlink(t.name)
-        notes = [l for l in (r.stdout + r.stderr).splitlines() if "[E]" in l or "[W]" in l]
-        if notes:
-            print("\nfindmnt --verify says (advisory):")
-            for l in notes:
-                print("  " + l.strip())
+    if show:
+        show_diff(old, new_text)
+        findmnt_notes(new_text)
     if args.dry_run:
         print("\n(dry run: nothing written)")
         return False
     if not os.access(FSTAB_PATH if FSTAB_PATH.exists() else FSTAB_PATH.parent, os.W_OK):
         die(f"no permission to write {FSTAB_PATH}; re-run with sudo")
-    if not confirm("\nApply this change?", args.yes):
+    if show and not confirm("\nApply this change?", args.yes):
         print("Cancelled.")
         return False
     b = make_backup(note=f"auto: before {note}", dedupe=True)
@@ -556,9 +553,30 @@ def write_fstab(new_text, note, args, post=None):
     print(f"\nWritten. Previous version saved as backup {b['id']}.")
     if post:
         post()
-    print("Next: 'sudo systemctl daemon-reload' (systemd distros), then 'sudo mount -a' to test.")
-    print(f"Undo any time with: fstabctl restore {b['id']}")
+    if not quiet_next:
+        print("Next: 'sudo systemctl daemon-reload' (systemd distros), then 'sudo mount -a' to test.")
+    print(f"Undo the fstab change any time with: fstabctl restore {b['id']}")
     return True
+
+
+def findmnt_notes(new_text):
+    if shutil.which("findmnt"):
+        with tempfile.NamedTemporaryFile("w", suffix=".fstab", delete=False) as t:
+            t.write(new_text)
+        r = run(["findmnt", "--verify", "--tab-file", t.name])
+        os.unlink(t.name)
+        notes, target = [], ""
+        for l in (r.stdout + r.stderr).splitlines():
+            if l and not l[0].isspace():
+                target = l.strip()  # findmnt groups its notes under each mount point
+            if target in ("none", "swap"):
+                continue  # swap lines: findmnt doesn't understand swap files; 'fstabctl swap list' reports missing swap
+            if "[E]" in l or "[W]" in l:
+                notes.append(l)
+        if notes:
+            print("\nfindmnt --verify says (advisory):")
+            for l in notes:
+                print("  " + l.strip())
 
 
 # ---------------------------------------------------------- target lookup --
@@ -957,6 +975,570 @@ def cmd_own(args):
     print(f"\n✓ {u.pw_name} now owns {res['changed']} item(s) in {d}")
     if res["failed"]:
         die(f"{res['failed']} item(s) could not be changed (first error: {res['err']})")
+
+
+# ----------------------------------------------------------------- swap ----
+PROC_SWAPS = "/proc/swaps"
+PROC_MEMINFO = "/proc/meminfo"
+MiB, GiB = 1 << 20, 1 << 30
+MIN_SWAP = 128 * MiB
+KEEP_FREE = 2 * GiB          # never fill a drive to the brim with swap
+SWAPOFF_SLACK = 256 * MiB    # memory left over after moving swap back into RAM
+SWAP_FILE_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs"}
+SWAP_FORBIDDEN = ["/proc", "/sys", "/dev", "/run", "/tmp", "/boot", "/etc", "/usr", "/bin", "/sbin",
+                  "/lib", "/lib32", "/lib64", "/snap", "/var/tmp"]
+
+
+def human(n):
+    if n >= GiB:
+        v = n / GiB
+        return f"{int(v)} GiB" if v == int(v) else f"{v:.1f} GiB"
+    if n >= MiB:
+        return f"{n // MiB} MiB"
+    return f"{n // 1024} KiB"
+
+
+def parse_swap_size(s):
+    m = re.match(r"(?i)^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT])(?:I?B)?\s*$", s or "")
+    if not m:
+        die(f"give a size like 4G or 512M (not {s!r})")
+    n = int(float(m.group(1)) * {"K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}[m.group(2).upper()])
+    n = n // MiB * MiB
+    if n < MIN_SWAP:
+        die(f"a swap file must be at least {human(MIN_SWAP)}")
+    return n
+
+
+def read_proc_swaps():
+    out = []
+    try:
+        lines = Path(PROC_SWAPS).read_text().splitlines()[1:]
+    except OSError:
+        return out
+    for l in lines:
+        f = l.split()
+        if len(f) < 5:
+            continue
+        out.append(dict(name=unescape(f[0]), kind=f[1], size=int(f[2]) * 1024, used=int(f[3]) * 1024, prio=int(f[4])))
+    return out
+
+
+def meminfo():
+    total = avail = 0
+    try:
+        for l in Path(PROC_MEMINFO).read_text().splitlines():
+            p = l.split()
+            if p and p[0] == "MemTotal:":
+                total = int(p[1]) * 1024
+            elif p and p[0] == "MemAvailable:":
+                avail = int(p[1]) * 1024
+    except OSError:
+        pass
+    return total, avail
+
+
+def is_swap_file_spec(spec):
+    return spec.startswith("/") and not spec.startswith("/dev/")
+
+
+def area_size(path, kind):
+    try:
+        if kind == "file":
+            return os.stat(path).st_size
+        return int(Path("/sys/class/block", os.path.basename(path), "size").read_text()) * 512
+    except (OSError, ValueError):
+        return 0
+
+
+def fs_at(path):
+    """(fstype, mount point) holding path."""
+    p = os.path.realpath(path)
+    best, best_type = "", ""
+    try:
+        for line in Path("/proc/self/mounts").read_text().splitlines():
+            f = line.split()
+            if len(f) < 3:
+                continue
+            mp = unescape(f[1])
+            if (p == mp or mp == "/" or p.startswith(mp + "/")) and len(mp) >= len(best):
+                best, best_type = mp, f[2]
+    except OSError:
+        pass
+    return best_type, best
+
+
+def free_space(d):
+    try:
+        st = os.statvfs(d)
+        return st.f_bavail * st.f_frsize
+    except OSError:
+        return 0
+
+
+def hibernates_to(path, is_file):
+    try:
+        dev = Path("/sys/power/resume").read_text().strip()
+        if not dev or dev == "0:0":
+            return False
+        st = os.stat(path)
+        did = st.st_rdev
+        if is_file:
+            off = Path("/sys/power/resume_offset").read_text().strip()
+            if off in ("", "0"):
+                return False
+            did = st.st_dev
+        return f"{os.major(did)}:{os.minor(did)}" == dev
+    except OSError:
+        return False
+
+
+def swap_header(path):
+    """(uuid, ok): a swap area's signature. The UUID is kept when a file is recreated."""
+    try:
+        with open(path, "rb") as f:
+            buf = f.read(65536)
+    except OSError:
+        return "", False
+    ok = any(ps <= len(buf) and buf[ps - 10:ps] == b"SWAPSPACE2" for ps in (4096, 8192, 16384, 65536))
+    if not ok or len(buf) < 1052:
+        return "", ok
+    u = buf[1036:1052]
+    if u == bytes(16):
+        return "", True
+    h = u.hex()
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}", True
+
+
+def swap_state(entries):
+    total, avail = meminfo()
+    active = read_proc_swaps()
+    by_path = {os.path.realpath(a["name"]): a for a in active}
+    items, seen = [], set()
+    for n, (_, e) in enumerate(entries, 1):
+        if e.fstype != "swap":
+            continue
+        it = dict(name=e.spec, kind="file" if is_swap_file_spec(e.spec) else "partition", size=0, used=0, prio=0,
+                  active=False, entry=n, spec=e.spec, enabled=e.enabled, missing=False)
+        r = resolve(e.spec)
+        if r is None:
+            it["missing"] = True
+        else:
+            if it["kind"] == "partition":
+                it["name"] = r
+            a = by_path.get(os.path.realpath(r))
+            if a:
+                it.update(active=True, size=max(a["size"], area_size(r, it["kind"])), used=a["used"], prio=a["prio"])
+                seen.add(os.path.realpath(r))
+            else:
+                it["size"] = area_size(r, it["kind"])
+        if os.path.basename(it["name"]).startswith("zram"):
+            it["kind"] = "zram"
+        items.append(it)
+    for a in active:
+        if os.path.realpath(a["name"]) in seen:
+            continue
+        kind = "zram" if os.path.basename(a["name"]).startswith("zram") else ("file" if a["kind"] == "file" else "partition")
+        size = max(a["size"], area_size(a["name"], "file")) if kind == "file" else a["size"]
+        items.append(dict(name=a["name"], kind=kind, size=size, used=a["used"], prio=a["prio"], active=True,
+                          entry=0, spec="", enabled=True, missing=False))
+    for it in items:
+        it["hibernate"] = not it["missing"] and hibernates_to(it["name"], it["kind"] == "file")
+    return dict(mem_total=total, mem_available=avail, items=items)
+
+
+def swap_target(fs, target, expect=None):
+    """(item, (idx, entry) or None) for a fstab entry number, path or device."""
+    ents = fs.entries()
+    items = swap_state(ents)["items"]
+    hits = [it for it in items if (it["entry"] and str(it["entry"]) == target) or target in (it["name"], it["spec"])
+            or (not it["missing"] and os.path.realpath(target) == os.path.realpath(it["name"]))]
+    if not hits:
+        if target.isdigit() and 1 <= int(target) <= len(ents):
+            die(f"entry {target} isn't swap")
+        die(f"no swap matches '{target}' (use a swap file path, device, or # from 'fstabctl swap list')")
+    if len(hits) > 1:
+        die(f"'{target}' matches several swap areas; use the # from 'fstabctl swap list'")
+    it = hits[0]
+    if expect and expect not in (it["spec"], it["name"]):
+        die(f"swap has changed since this was shown ({target} is now {it['name']}); refresh and try again")
+    return it, (ents[it["entry"] - 1] if it["entry"] else None)
+
+
+def can_swap_off(it):
+    if not it["active"] or not it["used"]:
+        return
+    _, avail = meminfo()
+    if it["used"] + SWAPOFF_SLACK > avail:
+        die(f"{it['name']} holds {human(it['used'])} right now and only {human(avail)} of memory is free, so it can't "
+            "be turned off safely. Close some programs (or add another swap area first) and try again")
+
+
+def off_step(it):
+    if not it["used"]:
+        return "Turn it off (nothing is stored in it right now)"
+    return f"Turn it off (moves the {human(it['used'])} stored in it back into memory)"
+
+
+def swap_entry(spec, prio=None):
+    return Entry(spec, "none", "swap", "sw" + (f",pri={prio}" if prio is not None else ""), 0, 0, True)
+
+
+def need_root(what):
+    if os.geteuid() != 0:
+        die(f"{what} needs administrator rights; re-run with sudo")
+
+
+def swap_on(path, e=None):
+    cmd = ["swapon"]
+    for o in (e.opts() if e else []):
+        if o.startswith("pri="):
+            cmd += ["-p", o[4:]]
+        elif o == "discard" or o.startswith("discard="):
+            cmd.append("--" + o)
+    r = run(cmd + [path])
+    return None if r.returncode == 0 else f"swapon: {(r.stderr + ' ' + r.stdout).strip()}"
+
+
+def swap_off(path):
+    r = run(["swapoff", path])
+    return None if r.returncode == 0 else f"swapoff: {(r.stderr + ' ' + r.stdout).strip()}"
+
+
+def check_swap_path(path, size, reuse=0):
+    if not path.startswith("/"):
+        die("the swap file path must start with /")
+    path = os.path.normpath(path)
+    for p in SWAP_FORBIDDEN:
+        if path == p or path.startswith(p + "/"):
+            die(f"a swap file can't go in {p}; try /swapfile")
+    d = os.path.dirname(path)
+    if not os.path.isdir(d):
+        die(f"folder {d} doesn't exist")
+    ft, mp = fs_at(d)
+    if ft not in SWAP_FILE_FS:
+        die(f"{path} is on {ft} (mounted at {mp}); Linux can only use swap files on ext4, xfs or btrfs")
+    free = free_space(d) + reuse
+    if size + KEEP_FREE > free:
+        die(f"not enough free space on {mp} for {human(size)} of swap: {human(free)} free, and {human(KEEP_FREE)} must stay free")
+    return ft
+
+
+def make_swap_file(path, size, ft, uuid=""):
+    """Create path as a swap area of size bytes (keeping uuid if given). Returns an error or None."""
+    def cleanup(msg):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        return msg
+    made = False
+    if ft == "btrfs" and shutil.which("btrfs"):
+        made = run(["btrfs", "filesystem", "mkswapfile", "--size", f"{size // MiB}m", path]).returncode == 0
+        if not made and os.path.lexists(path):
+            os.unlink(path)
+    if not made:
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        except OSError as ex:
+            return str(ex)
+        if ft == "btrfs":  # no copy-on-write and no compression: required for a swap file on btrfs
+            r = run(["chattr", "+C", path])
+            if r.returncode != 0:
+                return cleanup(f"chattr +C: {r.stderr.strip()}")
+        if run(["fallocate", "-l", str(size), path]).returncode != 0:
+            try:
+                with open(path, "wb") as f:
+                    zero = bytes(MiB)
+                    for _ in range(size // MiB):
+                        f.write(zero)
+                    os.fsync(f.fileno())
+            except OSError as ex:
+                return cleanup(str(ex))
+    os.chmod(path, 0o600)
+    try:
+        os.chown(path, 0, 0)
+    except OSError:
+        pass
+    r = run(["mkswap"] + (["-U", uuid] if uuid else []) + [path])
+    if r.returncode != 0:
+        return cleanup(f"mkswap: {r.stderr.strip()}")
+    return None
+
+
+def hibernate_note(it, what):
+    if it.get("hibernate"):
+        print(f"Warning: this computer hibernates to {it['name']}. After you {what}, hibernation won't work until you "
+              "update the\nresume settings (resume= / resume_offset= in the boot options, then update-initramfs and update-grub).")
+
+
+def _ask(args, prompt):
+    if args.dry_run:
+        print("\n(dry run: nothing changed)")
+        return False
+    if not confirm(f"\n{prompt}", args.yes):
+        print("Cancelled.")
+        return False
+    return True
+
+
+def _preview_fstab(new_text):
+    show_diff(read_fstab(), new_text)
+    findmnt_notes(new_text)
+
+
+def cmd_swap_list(args):
+    st = swap_state(Fstab(read_fstab()).entries())
+    print(f"Memory: {human(st['mem_total'])}, {human(st['mem_available'])} available now\n")
+    if not st["items"]:
+        print("No swap is set up.")
+        return
+    rows = []
+    for it in st["items"]:
+        state = ("missing" if it["missing"] else "on" if it["active"]
+                 else "disabled" if it["entry"] and not it["enabled"] else "off")
+        rows.append([str(it["entry"]) if it["entry"] else "–", it["name"], it["kind"], human(it["size"]),
+                     human(it["used"]) if it["active"] else "–", state, "in fstab" if it["entry"] else "not in fstab"])
+    print(table(["#", "Swap", "Kind", "Size", "Used", "State", "fstab"], rows))
+
+
+def cmd_swap_create(args):
+    path = os.path.normpath(args.path)
+    size = parse_swap_size(args.size)
+    if args.priority is not None and not -1 <= args.priority <= 32767:
+        die("--priority must be a number from -1 to 32767")
+    if os.path.lexists(path):
+        die(f"{path} already exists; choose another name, or resize it if it's a swap file")
+    ft = check_swap_path(path, size)
+    fs = Fstab(read_fstab())
+    if any(e.spec == path for _, e in fs.entries()):
+        die(f"{path} is already in fstab (entry for a file that doesn't exist); remove that entry first")
+    print(f"Will create a {human(size)} swap file at {path} (on {ft}, {human(free_space(os.path.dirname(path)))} free there now).")
+    print("  1. Make the file and set it up as swap (only root can read it)")
+    print("  2. Add it to fstab, so it's used after every restart")
+    print("  3. Turn it on now")
+    if ft == "btrfs":
+        print("Note: on btrfs, a snapshot of the subvolume holding a swap file fails. If you use snapshots (Timeshift, "
+              "Snapper),\nput the swap file in a subvolume of its own, such as /swap.")
+    print()
+    e = swap_entry(path, args.priority)
+    fs.append(e)
+    _preview_fstab(fs.text())
+    if not args.dry_run:
+        need_root("creating swap")
+    if not _ask(args, "Create the swap file?"):
+        return
+    err = make_swap_file(path, size, ft)
+    if err:
+        die(f"couldn't create the swap file: {err}")
+    print(f"✓ created {path} ({human(size)})")
+    try:
+        write_fstab(fs.text(), f"swap create {path}", args, show=False, quiet_next=True)
+    except SystemExit:
+        os.unlink(path)
+        print(f"Removed {path} again, because fstab couldn't be updated.")
+        raise
+    err = swap_on(path, e)
+    if err:
+        die(f"the swap file is made and in fstab, but turning it on failed ({err}); it will be used after a restart")
+    print(f"✓ {path} is on. You now have {human(size)} more swap.")
+
+
+def cmd_swap_resize(args):
+    size = parse_swap_size(args.size)
+    fs = Fstab(read_fstab())
+    it, ie = swap_target(fs, args.target, args.expect)
+    if it["kind"] == "zram":
+        die(f"{it['name']} is compressed swap in memory (zram); change its size in /etc/systemd/zram-generator.conf")
+    if it["kind"] != "file":
+        die(f"{it['name']} is a partition. A partition's size can only be changed by repartitioning the disk (KDE "
+            "Partition Manager or GParted, from a live USB). An easier way to get more swap: add a swap file")
+    if it["missing"]:
+        die(f"{it['name']} doesn't exist; remove its fstab entry, or create it again")
+    path = it["name"]
+    cur = area_size(path, "file")
+    if size == cur:
+        die(f"{path} is already {human(size)}")
+    uuid, ok = swap_header(path)
+    if not ok:
+        die(f"{path} isn't a swap file (no swap signature); fstabctl won't touch it")
+    ft = check_swap_path(path, size, cur)
+    can_swap_off(it)
+    turn_on = it["active"] or (ie is not None and ie[1].enabled)
+    print(f"Will resize the swap file {path} from {human(cur)} to {human(size)}.")
+    print(f"  1. {off_step(it)}" if it["active"] else "  1. (it's off now)")
+    print("  2. Make it again at the new size, keeping its UUID")
+    if turn_on:
+        print("  3. Turn it back on")
+    print("fstab doesn't change: the entry names the file, not its size.")
+    hibernate_note(it, "resize it")
+    if not args.dry_run:
+        need_root("resizing swap")
+    if not _ask(args, "Resize it?"):
+        return
+    e = ie[1] if ie else None
+    if it["active"]:
+        err = swap_off(path)
+        if err:
+            die(f"{err}; nothing was changed")
+        print(f"✓ turned off {path}")
+    os.unlink(path)
+    err = make_swap_file(path, size, ft, uuid)
+    if err:
+        print(f"✗ couldn't make it at {human(size)}: {err}")
+        if make_swap_file(path, cur, ft, uuid) is None:
+            if turn_on:
+                swap_on(path, e)
+            die(f"resize failed; {path} was put back at {human(cur)}")
+        die(f"resize failed and the old file couldn't be put back; create it again with: fstabctl swap create {path} "
+            f"--size {human(cur)} (after removing its fstab entry)")
+    print(f"✓ {path} is now {human(size)}")
+    if turn_on:
+        err = swap_on(path, e)
+        if err:
+            die(f"resized, but turning it on failed ({err}); it will be used after a restart")
+        print(f"✓ turned on {path}")
+
+
+def cmd_swap_remove(args):
+    fs = Fstab(read_fstab())
+    it, ie = swap_target(fs, args.target, args.expect)
+    if it["kind"] == "zram":
+        die(f"{it['name']} is compressed swap in memory (zram), set up by your system. To stop it, remove the "
+            "zram-generator (or systemd-zram-setup) package or edit /etc/systemd/zram-generator.conf")
+    can_swap_off(it)
+    delete = it["kind"] == "file" and not args.keep_file and not it["missing"]
+    if delete:
+        if not os.path.isfile(it["name"]) or os.path.islink(it["name"]):
+            delete = False
+        elif not swap_header(it["name"])[1] and not it["active"]:
+            die(f"{it['name']} doesn't look like a swap file (no swap signature); remove the fstab entry with "
+                f"'fstabctl remove {it['entry']}', or use --keep-file")
+    print(f"Will remove swap {it['name']} ({it['kind']}, {human(it['size'])}).")
+    step = 1
+    if it["active"]:
+        print(f"  {step}. {off_step(it)}")
+        step += 1
+    if ie:
+        print(f"  {step}. Take it out of fstab")
+        step += 1
+    if delete:
+        print(f"  {step}. Delete the file, freeing {human(it['size'])}")
+    elif it["kind"] == "partition":
+        print("The partition itself is left as it is; reuse it or delete it with a partition editor.")
+    others = [x for x in swap_state(fs.entries())["items"] if x["active"] and x["name"] != it["name"]]
+    if it["active"] and not others:
+        print("Note: this is your only swap. Without swap, running out of memory closes programs instead of slowing down.")
+    hibernate_note(it, "remove it")
+    if ie:
+        fs.remove(ie[0])
+        print()
+        _preview_fstab(fs.text())
+    if not args.dry_run:
+        need_root("removing swap")
+    if not _ask(args, "Remove it?"):
+        return
+    if it["active"]:
+        err = swap_off(it["name"])
+        if err:
+            die(f"{err}; nothing was changed")
+        print(f"✓ turned off {it['name']}")
+    if ie:
+        write_fstab(fs.text(), f"swap remove {it['name']}", args, show=False, quiet_next=True)
+    if delete:
+        os.unlink(it["name"])
+        print(f"✓ deleted {it['name']}")
+
+
+def _swap_onoff(args, on):
+    fs = Fstab(read_fstab())
+    it, ie = swap_target(fs, args.target, args.expect)
+    if it["missing"]:
+        die(f"{it['name']} isn't there")
+    if on == it["active"]:
+        die(f"{it['name']} is already {'on' if on else 'off'}")
+    if not on:
+        can_swap_off(it)
+    verb = "on" if on else "off"
+    tail = (", so it comes back on after a restart (use 'fstabctl disable' to stop that)."
+            if ie and not on and ie[1].enabled else ".")
+    print(f"Will turn {verb} {it['name']} now. fstab doesn't change{tail}")
+    if not args.dry_run:
+        need_root(f"turning swap {verb}")
+    if not _ask(args, f"Turn it {verb}?"):
+        return
+    err = swap_on(it["name"], ie[1] if ie else None) if on else swap_off(it["name"])
+    if err:
+        die(err)
+    print(f"✓ {it['name']} is {verb}")
+
+
+def cmd_swap_on(args):
+    _swap_onoff(args, True)
+
+
+def cmd_swap_off(args):
+    _swap_onoff(args, False)
+
+
+def cmd_swap_setup(args):
+    """Make a partition into swap (if it isn't already), add it to fstab and turn it on."""
+    want = args.device if args.device.startswith("/") else (resolve(args.device) or args.device)
+    dev = next((d for d in lsblk() if d["path"] == args.device or os.path.realpath(d["path"]) == os.path.realpath(want)), None)
+    if not dev:
+        die(f"no partition {args.device} found")
+    if dev["type"] not in ("part", "lvm", "crypt"):
+        die(f"{dev['path']} is a {dev['type']}; choose a partition")
+    if dev["mounts"]:
+        die(f"{dev['path']} is in use (mounted at {', '.join(dev['mounts'])})")
+    if dev["fstype"] in NON_FS:
+        die(f"{dev['path']} holds {dev['fstype']}; it is part of another storage setup, so fstabctl won't touch it")
+    holders = Path("/sys/class/block", os.path.basename(os.path.realpath(dev["path"])), "holders")
+    if holders.is_dir() and any(holders.iterdir()):
+        die(f"{dev['path']} holds other volumes; fstabctl won't touch it")
+    if any(os.path.realpath(a["name"]) == os.path.realpath(dev["path"]) for a in read_proc_swaps()):
+        die(f"{dev['path']} is already swap and on")
+    fs = Fstab(read_fstab())
+    for _, e in fs.entries():
+        if e.enabled and resolve(e.spec) == os.path.realpath(dev["path"]):
+            die(f"{dev['path']} is already in fstab (entry for {e.file})")
+    fmt = dev["fstype"] != "swap"
+    if fmt and dev["fstype"] and not args.erase:
+        what = dev["fstype"] + (f", label {dev['label']}" if dev["label"] else "")
+        die(f"{dev['path']} holds a {what} filesystem. Making it swap erases everything on it; add --erase if that's what you want")
+    print(f"Will use {dev['path']} ({dev['size']}) as swap.")
+    step = 1
+    if fmt:
+        if dev["fstype"]:
+            print(f"  {step}. ERASE it: everything on this {dev['fstype']} partition"
+                  + (f" ({dev['label']})" if dev["label"] else "") + " is lost")
+        else:
+            print(f"  {step}. Set it up as swap (it's empty)")
+        step += 1
+    print(f"  {step}. Add it to fstab by UUID\n  {step + 1}. Turn it on now\n")
+    spec = "UUID=(made-by-mkswap)" if fmt else f"UUID={dev['uuid']}"
+    preview = Fstab(fs.text())
+    preview.append(swap_entry(spec, args.priority))
+    _preview_fstab(preview.text())
+    if not args.dry_run:
+        need_root("setting up swap")
+    if not _ask(args, "Erase it and use it as swap?" if fmt and dev["fstype"] else "Use it as swap?"):
+        return
+    if fmt:
+        r = run(["mkswap", "-f", dev["path"]])
+        if r.returncode != 0:
+            die(f"mkswap: {r.stderr.strip()}")
+        uuid, ok = swap_header(dev["path"])
+        if not ok or not uuid:
+            die(f"mkswap ran but {dev['path']} has no swap UUID")
+        spec = f"UUID={uuid}"
+        print(f"✓ {dev['path']} is now swap")
+    e = swap_entry(spec, args.priority)
+    fs.append(e)
+    write_fstab(fs.text(), f"swap setup {dev['path']}", args, show=False, quiet_next=True)
+    err = swap_on(dev["path"], e)
+    if err:
+        die(f"added to fstab, but turning it on failed ({err}); it will be used after a restart")
+    print(f"✓ {dev['path']} is on")
 
 
 def cmd_repair(args):
@@ -1975,6 +2557,39 @@ def build_parser():
     s.add_argument("target", help="mount point, device spec, or # from 'list'")
     s.add_argument("-R", "--recursive", action="store_true", help="also every file and folder on the drive below it")
     s.add_argument("--expect", metavar="SPEC", help="only act if this entry's device is still SPEC")
+
+    # ---- swap
+    swp = sub.add_parser("swap", help="list, add, resize or remove swap files and swap partitions",
+                         description="Swap files: create, resize, remove. Swap partitions: set up, turn on or off, "
+                                     "remove from fstab. Every change shows a preview first.")
+    ssub = swp.add_subparsers(dest="swapcmd", required=True, metavar="action")
+
+    def sadd(name, fn, help_):
+        x = ssub.add_parser(name, parents=[common], help=help_, description=help_)
+        x.set_defaults(fn=fn)
+        return x
+    sadd("list", cmd_swap_list, "show swap areas, their size and use")
+    x = sadd("create", cmd_swap_create, "make a swap file, add it to fstab and turn it on")
+    x.add_argument("path", help="where the file goes, e.g. /swapfile")
+    x.add_argument("--size", required=True, help="e.g. 4G or 512M")
+    x.add_argument("--priority", type=int, help="swap priority (-1 to 32767; higher is used first)")
+    x = sadd("resize", cmd_swap_resize, "change a swap file's size (turns it off and on again)")
+    x.add_argument("target", help="swap file path or # from 'swap list'")
+    x.add_argument("--size", required=True, help="new size, e.g. 8G")
+    x.add_argument("--expect", metavar="SPEC", help=expect_help)
+    x = sadd("remove", cmd_swap_remove, "turn swap off, take it out of fstab and delete a swap file")
+    x.add_argument("target", help="swap file path, device, or # from 'swap list'")
+    x.add_argument("--keep-file", action="store_true", help="don't delete the swap file")
+    x.add_argument("--expect", metavar="SPEC", help=expect_help)
+    for name, fn, hlp in (("on", cmd_swap_on, "turn swap on now (until the next restart)"),
+                          ("off", cmd_swap_off, "turn swap off now (until the next restart)")):
+        x = sadd(name, fn, hlp)
+        x.add_argument("target", help="swap file path, device, or # from 'swap list'")
+        x.add_argument("--expect", metavar="SPEC", help=expect_help)
+    x = sadd("setup", cmd_swap_setup, "use a partition as swap: set it up, add it to fstab and turn it on")
+    x.add_argument("device", help="e.g. /dev/sdb2")
+    x.add_argument("--erase", action="store_true", help="allow erasing a partition that holds a filesystem")
+    x.add_argument("--priority", type=int, help="swap priority (-1 to 32767)")
 
     s = add("repair", cmd_repair, "fix a line that can't be read")
     g = s.add_mutually_exclusive_group(required=True)

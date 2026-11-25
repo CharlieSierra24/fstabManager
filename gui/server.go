@@ -21,10 +21,10 @@ import (
 var uiHTML string
 
 var (
-	allowedCmds     = map[string]bool{"add": true, "remove": true, "enable": true, "disable": true, "set": true, "backup": true, "restore": true, "import": true, "diff": true, "mount": true, "repair": true, "own": true}
+	allowedCmds     = map[string]bool{"add": true, "remove": true, "enable": true, "disable": true, "set": true, "backup": true, "restore": true, "import": true, "diff": true, "mount": true, "repair": true, "own": true, "swap": true}
 	allowedLinkCmds = map[string]bool{"add": true, "set": true, "remove": true, "backup": true, "restore": true, "import": true,
 		"discover": true, "track": true, "untrack": true, "folders": true}
-	privCmds = map[string]bool{"add": true, "remove": true, "enable": true, "disable": true, "set": true, "restore": true, "import": true, "mount": true, "repair": true, "own": true}
+	privCmds = map[string]bool{"add": true, "remove": true, "enable": true, "disable": true, "set": true, "restore": true, "import": true, "mount": true, "repair": true, "own": true, "swap": true}
 )
 
 // privMethod: how this process can write fstab: "root", "direct", "pkexec", "sudo" or "".
@@ -98,6 +98,7 @@ type stateDoc struct {
 	LinkSnaps []snapView        `json:"link_snaps"`
 	Presets   presetList        `json:"presets"`
 	OptHelp   map[string]string `json:"optHelp"`
+	Swap      SwapState         `json:"swap"`
 }
 
 func buildState(depth int, hidden bool) (*stateDoc, error) {
@@ -147,6 +148,10 @@ func buildState(depth int, hidden bool) (*stateDoc, error) {
 		}
 	}
 	st.KeyFolder = keyFolders(home, ents, mounted)
+	st.Swap = swapState(ents)
+	if f := swapFinding(st.Swap); f != nil {
+		st.Warnings = append(st.Warnings, *f)
+	}
 	st.Backups = listBackups()
 	if st.Backups == nil {
 		st.Backups = []BackupMeta{}
