@@ -119,15 +119,15 @@ func main() {
 	}
 }
 
-// webkitWorkarounds avoids a known WebKitGTK problem: with NVIDIA's proprietary
-// driver the window can stay blank because of its DMA-BUF renderer. Turning that
-// renderer off is the standard fix; the user can override it by setting the
-// variable themselves.
+// webkitWorkarounds avoids known WebKitGTK crashes. Its DMA-BUF renderer and
+// accelerated compositing can make the window close at start with
+// "Error 71 (Protocol error) dispatching to Wayland display" (seen on KDE
+// Plasma with Intel graphics) or stay blank (NVIDIA). This app is a simple page,
+// so it turns both off. A user who sets either variable keeps their own value.
 func webkitWorkarounds() {
-	if _, set := os.LookupEnv("WEBKIT_DISABLE_DMABUF_RENDERER"); set {
-		return
-	}
-	if _, err := os.Stat("/proc/driver/nvidia/version"); err == nil {
-		os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+	for _, v := range []string{"WEBKIT_DISABLE_DMABUF_RENDERER", "WEBKIT_DISABLE_COMPOSITING_MODE"} {
+		if _, set := os.LookupEnv(v); !set {
+			os.Setenv(v, "1")
+		}
 	}
 }

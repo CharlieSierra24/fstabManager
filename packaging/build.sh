@@ -33,7 +33,8 @@ rpm_arch() { case $1 in amd64) echo x86_64;; arm64) echo aarch64;; riscv64) echo
 
 gui_binary() {   # build (or reuse) the desktop app for this architecture
   local bin=$ROOT/dist/fstab-manager-linux-$ARCH
-  if [[ ! -x $bin ]]; then
+  # rebuild when missing or older than any source file, so a stale binary is never packaged
+  if [[ ! -x $bin || -n $(find gui -newer "$bin" -type f -print -quit) ]]; then
     (cd gui && CGO_ENABLED=1 GOFLAGS=-mod=mod go build -buildmode=pie -tags desktop,production,webkit2_41 -trimpath \
       -ldflags "-s -w -B gobuildid" -o "$bin" .)
   fi

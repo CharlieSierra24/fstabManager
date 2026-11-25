@@ -16,13 +16,13 @@ Both read and write the **same files** (backups, snapshots, export bundles), so 
 **Debian, Ubuntu, Pop!_OS, Linux Mint and derivatives** (built and tested on Ubuntu 24.04; the package also allows Ubuntu 22.04, untested)
 
 ```sh
-sudo apt install ./fstab-manager_0.7.0-1_amd64.deb ./fstabctl_0.7.0-1_all.deb
+sudo apt install ./fstab-manager_0.7.1-1_amd64.deb ./fstabctl_0.7.0-1_all.deb
 ```
 
 **Fedora, RHEL and derivatives, openSUSE**
 
 ```sh
-sudo dnf install ./fstab-manager-0.7.0-1.x86_64.rpm ./fstabctl-0.7.0-1.noarch.rpm
+sudo dnf install ./fstab-manager-0.7.1-1.x86_64.rpm ./fstabctl-0.7.0-1.noarch.rpm
 ```
 
 The two packages are independent: install either or both. The desktop app needs GTK 3 and WebKitGTK 4.1, which the

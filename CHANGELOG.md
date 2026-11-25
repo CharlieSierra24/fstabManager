@@ -3,6 +3,14 @@
 Versions are per component: **CLI** is `fstabctl` (Python), **GUI** is fstab Manager, `fstab-manager` (Go; called
 `fstabctl-gui` up to 0.3.0).
 
+## 2026-11-24: fstab Manager 0.7.1 (package -1)
+
+### Fixed
+- The window closed straight after opening on KDE Plasma under Wayland, with "Error 71 (Protocol error) dispatching
+  to Wayland display" (seen on Kubuntu 26.04 with Intel graphics). The app now turns off WebKit's DMA-BUF renderer and
+  accelerated compositing on every system, not only with NVIDIA drivers. Setting `WEBKIT_DISABLE_DMABUF_RENDERER` or
+  `WEBKIT_DISABLE_COMPOSITING_MODE` yourself still overrides this.
+
 ## 2026-11-18: fstab Manager 0.7.0, fstabctl 0.7.0 (packages -1)
 
 ### Added

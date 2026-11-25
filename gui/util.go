@@ -15,7 +15,7 @@ import (
 	"unicode/utf8"
 )
 
-const version = "0.7.0"
+const version = "0.7.1"
 
 // invoker is the human who started us, even when we run under sudo/pkexec.
 func invoker() string {
