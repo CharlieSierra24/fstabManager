@@ -202,20 +202,32 @@ func TestSwapRefusals(t *testing.T) {
 	notSwap := filepath.Join(dir, "important")
 	os.WriteFile(notSwap, []byte("my data"), 0o600)
 	os.WriteFile(fst, []byte(notSwap+" none swap sw 0 0\n/dev/sda9 none swap sw 0 0\n/dev/zram0 none swap sw 0 0\n"), 0o644)
-	if code, out := runSwap(t, true, "remove", notSwap); code == 0 || !strings.Contains(out, "doesn't look like a swap file") {
+	if code, out := runSwap(t, true, "on", notSwap); code == 0 || !strings.Contains(out, "isn't set up as swap") {
+		t.Fatalf("turn on non-swap: %d %s", code, out)
+	}
+	if code, out := runSwap(t, true, "resize", notSwap, "--size", "1G"); code == 0 || !strings.Contains(out, "isn't set up as swap") {
+		t.Fatalf("resize non-swap: %d %s", code, out)
+	}
+	// remove takes the entry out of fstab but keeps a file that isn't recognisably swap
+	if code, out := runSwap(t, true, "remove", notSwap); code != 0 || !strings.Contains(out, "is kept") {
 		t.Fatalf("remove non-swap: %d %s", code, out)
 	}
 	if !lexists(notSwap) {
 		t.Fatal("deleted a file that isn't swap")
 	}
-	if code, out := runSwap(t, true, "resize", notSwap, "--size", "1G"); code == 0 || !strings.Contains(out, "isn't a swap file") {
-		t.Fatalf("resize non-swap: %d %s", code, out)
+	if b, _ := os.ReadFile(fst); strings.Contains(string(b), notSwap) {
+		t.Fatalf("entry still in fstab: %s", b)
+	}
+	// the disabled cryptswap-style entry shows as disabled, and the zram entry is now #2
+	os.WriteFile(fst, []byte("#fstabctl-disabled# /dev/mapper/cryptswap none swap defaults 0 0\n/dev/zram0 none swap sw 0 0\n"), 0o644)
+	if code, out := runSwap(t, false, "list"); code != 0 || !strings.Contains(out, "disabled") {
+		t.Fatalf("list: %d %s", code, out)
 	}
 	// partitions can't be resized; zram is the system's
-	if code, out := runSwap(t, false, "resize", "2", "--size", "1G"); code == 0 || !strings.Contains(out, "missing") && !strings.Contains(out, "doesn't exist") && !strings.Contains(out, "partition") {
+	if code, out := runSwap(t, false, "resize", "1", "--size", "1G"); code == 0 || !strings.Contains(out, "partition") {
 		t.Fatalf("resize partition: %d %s", code, out)
 	}
-	if code, out := runSwap(t, false, "remove", "3"); code == 0 || !strings.Contains(out, "zram") {
+	if code, out := runSwap(t, false, "remove", "2"); code == 0 || !strings.Contains(out, "zram") {
 		t.Fatalf("remove zram: %d %s", code, out)
 	}
 	// forbidden places and filesystems

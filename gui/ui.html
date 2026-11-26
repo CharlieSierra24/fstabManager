@@ -344,7 +344,7 @@ function viewDisks(){
 const GiB=1073741824, MiB=1048576;
 const hsize=n=>n>=GiB?(Math.round(n/GiB*10)/10)+" GiB":Math.round(n/MiB)+" MiB";
 const SWAP_PILL={on:"ok",off:"warn",missing:"bad",disabled:"off"};
-const swapState=it=>it.missing?"missing":it.active?"on":(!it.enabled&&it.entry)?"disabled":"off";
+const swapState=it=>it.active?"on":(!it.enabled&&it.entry)?"disabled":it.missing?"missing":"off";
 const swapTarget=it=>it.entry?String(it.entry):it.name;
 const swapGuard=it=>it.entry?["--expect",it.spec]:[];
 const KIND_LABEL={file:"swap file",partition:"partition",zram:"compressed, in memory (zram)"};

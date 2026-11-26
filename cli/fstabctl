@@ -45,7 +45,7 @@ import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 FSTAB_PATH = Path("/etc/fstab")
 DISABLED_MARK = "#fstabctl-disabled#"
 SYSTEM_MOUNTS = {"/", "/boot", "/boot/efi", "/efi"}
@@ -1092,21 +1092,31 @@ def hibernates_to(path, is_file):
         return False
 
 
-def swap_header(path):
-    """(uuid, ok): a swap area's signature. The UUID is kept when a file is recreated."""
+def swap_sig(path):
+    """(uuid, ok, readable): a swap area's signature. Swap files are readable only by root, and a
+    preview may run as the user, so "can't read" must not count as "not swap"."""
     try:
         with open(path, "rb") as f:
             buf = f.read(65536)
     except OSError:
-        return "", False
+        return "", False, False
     ok = any(ps <= len(buf) and buf[ps - 10:ps] == b"SWAPSPACE2" for ps in (4096, 8192, 16384, 65536))
     if not ok or len(buf) < 1052:
-        return "", ok
+        return "", ok, True
     u = buf[1036:1052]
     if u == bytes(16):
-        return "", True
+        return "", True, True
     h = u.hex()
-    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}", True
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}", True, True
+
+
+def swap_header(path):
+    """(uuid, ok): a swap area's signature. The UUID is kept when a file is recreated."""
+    uuid, ok, _ = swap_sig(path)
+    return uuid, ok
+
+
+CHECK_LATER = "(Only root can read it, so it's checked to be a swap file when you apply.)"
 
 
 def swap_state(entries):
@@ -1294,9 +1304,9 @@ def cmd_swap_list(args):
         return
     rows = []
     for it in st["items"]:
-        state = ("missing" if it["missing"] else "on" if it["active"]
-                 else "disabled" if it["entry"] and not it["enabled"] else "off")
-        rows.append([str(it["entry"]) if it["entry"] else "–", it["name"], it["kind"], human(it["size"]),
+        state = ("on" if it["active"] else "disabled" if it["entry"] and not it["enabled"]
+                 else "missing" if it["missing"] else "off")
+        rows.append([str(it["entry"]) if it["entry"] else "–", it["name"], it["kind"], human(it["size"]) if it["size"] else "–",
                      human(it["used"]) if it["active"] else "–", state, "in fstab" if it["entry"] else "not in fstab"])
     print(table(["#", "Swap", "Kind", "Size", "Used", "State", "fstab"], rows))
 
@@ -1358,9 +1368,10 @@ def cmd_swap_resize(args):
     cur = area_size(path, "file")
     if size == cur:
         die(f"{path} is already {human(size)}")
-    uuid, ok = swap_header(path)
-    if not ok:
-        die(f"{path} isn't a swap file (no swap signature); fstabctl won't touch it")
+    uuid, ok, readable = swap_sig(path)
+    if (readable and not ok) or (not readable and not args.dry_run):
+        die(f"{path} isn't set up as swap (it has no swap signature), so fstabctl won't resize it. "
+            "Remove it with 'fstabctl swap remove' (the file is kept), then add a new swap file")
     ft = check_swap_path(path, size, cur)
     can_swap_off(it)
     turn_on = it["active"] or (ie is not None and ie[1].enabled)
@@ -1370,6 +1381,8 @@ def cmd_swap_resize(args):
     if turn_on:
         print("  3. Turn it back on")
     print("fstab doesn't change: the entry names the file, not its size.")
+    if not readable:
+        print(CHECK_LATER)
     hibernate_note(it, "resize it")
     if not args.dry_run:
         need_root("resizing swap")
@@ -1407,12 +1420,18 @@ def cmd_swap_remove(args):
             "zram-generator (or systemd-zram-setup) package or edit /etc/systemd/zram-generator.conf")
     can_swap_off(it)
     delete = it["kind"] == "file" and not args.keep_file and not it["missing"]
+    keep_why, unchecked = "", False
     if delete:
+        _, ok, readable = swap_sig(it["name"])
         if not os.path.isfile(it["name"]) or os.path.islink(it["name"]):
             delete = False
-        elif not swap_header(it["name"])[1] and not it["active"]:
-            die(f"{it['name']} doesn't look like a swap file (no swap signature); remove the fstab entry with "
-                f"'fstabctl remove {it['entry']}', or use --keep-file")
+        elif not readable and args.dry_run:
+            unchecked = True
+        elif not ok and not it["active"]:
+            # never delete a file that isn't recognisably swap: keep it and say so
+            delete = False
+            keep_why = (f"{it['name']} is kept: it has no swap signature, so it may not be a swap file (or it may hold "
+                        f"data). If you're sure it isn't needed, delete it yourself: sudo rm {it['name']}")
     print(f"Will remove swap {it['name']} ({it['kind']}, {human(it['size'])}).")
     step = 1
     if it["active"]:
@@ -1423,6 +1442,10 @@ def cmd_swap_remove(args):
         step += 1
     if delete:
         print(f"  {step}. Delete the file, freeing {human(it['size'])}")
+        if unchecked:
+            print(f"     {CHECK_LATER} If it isn't one, it's kept.")
+    elif keep_why:
+        print(keep_why)
     elif it["kind"] == "partition":
         print("The partition itself is left as it is; reuse it or delete it with a partition editor.")
     others = [x for x in swap_state(fs.entries())["items"] if x["active"] and x["name"] != it["name"]]
@@ -1447,6 +1470,8 @@ def cmd_swap_remove(args):
     if delete:
         os.unlink(it["name"])
         print(f"✓ deleted {it['name']}")
+    elif keep_why:
+        print(keep_why)
 
 
 def _swap_onoff(args, on):
@@ -1458,6 +1483,11 @@ def _swap_onoff(args, on):
         die(f"{it['name']} is already {'on' if on else 'off'}")
     if not on:
         can_swap_off(it)
+    elif it["kind"] == "file":
+        _, ok, readable = swap_sig(it["name"])
+        if readable and not ok:
+            die(f"{it['name']} isn't set up as swap (it has no swap signature), so it can't be turned on. "
+                "Remove it (the file is kept), then add a new swap file")
     verb = "on" if on else "off"
     tail = (", so it comes back on after a restart (use 'fstabctl disable' to stop that)."
             if ie and not on and ie[1].enabled else ".")

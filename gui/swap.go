@@ -298,13 +298,21 @@ func human(n int64) string {
 
 // ---- swap signature -----------------------------------------------------------
 
-// swapHeader reads a swap area's signature; ok is false if it isn't one.
+// swapHeader reads a swap area's signature; ok is false if it isn't one (or can't be read).
 // The UUID is kept when a file is recreated, so anything that names it still works.
 func swapHeader(path string) (uuid string, ok bool) {
+	uuid, ok, _ = swapSig(path)
+	return
+}
+
+// swapSig is swapHeader that also says whether the file could be read at all. Swap files are
+// readable only by root, and previews run as the user, so "can't read" must not count as "not swap".
+func swapSig(path string) (uuid string, ok bool, readable bool) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
+	readable = true
 	defer f.Close()
 	buf := make([]byte, 65536)
 	n, _ := f.ReadAt(buf, 0)
@@ -316,14 +324,16 @@ func swapHeader(path string) (uuid string, ok bool) {
 		}
 	}
 	if !ok || len(buf) < 1052 {
-		return "", ok
+		return "", ok, true
 	}
 	u := buf[1036:1052]
 	if bytes.Equal(u, make([]byte, 16)) {
-		return "", true
+		return "", true, true
 	}
-	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16]), true
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16]), true, true
 }
+
+const checkLater = "(Only root can read it, so it's checked to be a swap file when you apply.)"
 
 // ---- the swap command ------------------------------------------------------------
 
@@ -372,12 +382,12 @@ func (c *Ctx) swapList() error {
 	for _, it := range st.Items {
 		state := "off"
 		switch {
-		case it.Missing:
-			state = "missing"
 		case it.Active:
 			state = "on"
 		case !it.Enabled && it.Entry > 0:
 			state = "disabled"
+		case it.Missing:
+			state = "missing"
 		}
 		n, fsCol := "–", "not in fstab"
 		if it.Entry > 0 {
@@ -387,7 +397,11 @@ func (c *Ctx) swapList() error {
 		if it.Active {
 			used = human(it.Used)
 		}
-		rows = append(rows, []string{n, it.Name, it.Kind, human(it.Size), used, state, fsCol})
+		size := "–"
+		if it.Size > 0 {
+			size = human(it.Size)
+		}
+		rows = append(rows, []string{n, it.Name, it.Kind, size, used, state, fsCol})
 	}
 	c.pl(table([]string{"#", "Swap", "Kind", "Size", "Used", "State", "fstab"}, rows, false))
 	return nil
@@ -671,9 +685,10 @@ func (c *Ctx) swapResize(args []string) error {
 	if size == cur {
 		return fail("%s is already %s", path, human(size))
 	}
-	uuid, ok := swapHeader(path)
-	if !ok {
-		return fail("%s isn't a swap file (no swap signature); fstabctl won't touch it", path)
+	uuid, ok, readable := swapSig(path)
+	if readable && !ok || !readable && c.apply {
+		return fail("%s isn't set up as swap (it has no swap signature), so fstabctl won't resize it. "+
+			"Remove it with Remove (the file is kept), then add a new swap file", path)
 	}
 	ft, err := checkSwapPath(path, size, cur)
 	if err != nil {
@@ -694,6 +709,9 @@ func (c *Ctx) swapResize(args []string) error {
 		c.pl("  3. Turn it back on")
 	}
 	c.pl("fstab doesn't change: the entry names the file, not its size.")
+	if !readable {
+		c.pl(checkLater)
+	}
 	hibernateNote(c, it, "resize it")
 	if !c.apply {
 		c.pl("\n(dry run: nothing changed)")
@@ -760,12 +778,17 @@ func (c *Ctx) swapRemove(args []string) error {
 		return err
 	}
 	deleteFile := it.Kind == "file" && !a.has("keep-file") && !it.Missing
+	keepWhy, unchecked := "", false
 	if deleteFile {
 		if fi, err := os.Lstat(it.Name); err != nil || !fi.Mode().IsRegular() {
 			deleteFile = false
-		} else if _, ok := swapHeader(it.Name); !ok && !it.Active {
-			return fail("%s doesn't look like a swap file (no swap signature); remove the fstab entry with "+
-				"'remove %d', or use --keep-file", it.Name, it.Entry)
+		} else if _, ok, readable := swapSig(it.Name); !readable && !c.apply {
+			unchecked = true
+		} else if !ok && !it.Active {
+			// never delete a file that isn't recognisably swap: keep it and say so
+			deleteFile = false
+			keepWhy = fmt.Sprintf("%s is kept: it has no swap signature, so it may not be a swap file (or it may hold data). "+
+				"If you're sure it isn't needed, delete it yourself: sudo rm %s", it.Name, it.Name)
 		}
 	}
 	c.pf("Will remove swap %s (%s, %s).\n", it.Name, it.Kind, human(it.Size))
@@ -780,6 +803,11 @@ func (c *Ctx) swapRemove(args []string) error {
 	}
 	if deleteFile {
 		c.pf("  %d. Delete the file, freeing %s\n", step, human(it.Size))
+		if unchecked {
+			c.pl("     " + checkLater + " If it isn't one, it's kept.")
+		}
+	} else if keepWhy != "" {
+		c.pl(keepWhy)
 	} else if it.Kind == "partition" {
 		c.pl("The partition itself is left as it is; reuse it or delete it with a partition editor.")
 	}
@@ -826,6 +854,8 @@ func (c *Ctx) swapRemove(args []string) error {
 			return fail("couldn't delete %s: %v", it.Name, err)
 		}
 		c.pf("✓ deleted %s\n", it.Name)
+	} else if keepWhy != "" {
+		c.pl(keepWhy)
 	}
 	return nil
 }
@@ -858,6 +888,11 @@ func (c *Ctx) swapOnOff(args []string, on bool) error {
 	if !on {
 		if err := canSwapOff(it); err != nil {
 			return err
+		}
+	} else if it.Kind == "file" {
+		if _, ok, readable := swapSig(it.Name); readable && !ok {
+			return fail("%s isn't set up as swap (it has no swap signature), so it can't be turned on. "+
+				"Remove it (the file is kept), then add a new swap file", it.Name)
 		}
 	}
 	verb := "off"

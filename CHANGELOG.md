@@ -3,6 +3,18 @@
 Versions are per component: **CLI** is `fstabctl` (Python), **GUI** is fstab Manager, `fstab-manager` (Go; called
 `fstabctl-gui` up to 0.3.0).
 
+## 2026-11-25: fstab Manager 0.8.1, fstabctl 0.8.1 (packages -1)
+
+### Fixed
+- Swap: **Remove…** on a swap file said "doesn't look like a swap file (no swap signature)" even for a real one. Swap
+  files are readable only by root and the preview runs as you, so the file couldn't be read; that was taken as "not swap".
+  Previews now say the check happens when you apply.
+- Swap: removing a file that really has no swap signature no longer stops with an error that only names a terminal
+  command. The entry is taken out of fstab and the file is kept, with a note on deleting it yourself.
+- Swap: **Turn on** and **Resize…** explain clearly when a file isn't set up as swap.
+- Swap: a disabled entry (such as an old `/dev/mapper/cryptswap` line) shows as "disabled", not "missing"; unknown
+  sizes show "–" instead of "0 KiB".
+
 ## 2026-11-25: fstab Manager 0.8.0, fstabctl 0.8.0 (packages -1)
 
 ### Added

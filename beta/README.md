@@ -1,6 +1,6 @@
 # Beta packages
 
-Ready-to-install packages of **fstab Manager 0.8.0** (desktop app) and **fstabctl 0.8.0** (command-line tool).
+Ready-to-install packages of **fstab Manager 0.8.1** (desktop app) and **fstabctl 0.8.1** (command-line tool).
 
 > **Beta.** These builds are tested on Ubuntu 24.04 (x86-64) and used on Pop!_OS 24.04, but not yet across
 > every distribution, desktop and graphics driver. fstab Manager edits `/etc/fstab`, a file your computer needs to
@@ -10,10 +10,10 @@ Ready-to-install packages of **fstab Manager 0.8.0** (desktop app) and **fstabct
 
 | File | For |
 | --- | --- |
-| [`fstab-manager_0.8.0-1_amd64.deb`](fstab-manager_0.8.0-1_amd64.deb) | Desktop app: Pop!_OS, Ubuntu, Debian, Linux Mint (x86-64) |
-| [`fstabctl_0.8.0-1_all.deb`](fstabctl_0.8.0-1_all.deb) | Command-line tool: Pop!_OS, Ubuntu, Debian, Linux Mint |
-| [`fstab-manager-0.8.0-1.x86_64.rpm`](fstab-manager-0.8.0-1.x86_64.rpm) | Desktop app: Fedora, openSUSE (x86-64) |
-| [`fstabctl-0.8.0-1.noarch.rpm`](fstabctl-0.8.0-1.noarch.rpm) | Command-line tool: Fedora, openSUSE |
+| [`fstab-manager_0.8.1-1_amd64.deb`](fstab-manager_0.8.1-1_amd64.deb) | Desktop app: Pop!_OS, Ubuntu, Debian, Linux Mint (x86-64) |
+| [`fstabctl_0.8.1-1_all.deb`](fstabctl_0.8.1-1_all.deb) | Command-line tool: Pop!_OS, Ubuntu, Debian, Linux Mint |
+| [`fstab-manager-0.8.1-1.x86_64.rpm`](fstab-manager-0.8.1-1.x86_64.rpm) | Desktop app: Fedora, openSUSE (x86-64) |
+| [`fstabctl-0.8.1-1.noarch.rpm`](fstabctl-0.8.1-1.noarch.rpm) | Command-line tool: Fedora, openSUSE |
 | [`SHA256SUMS`](SHA256SUMS) | Checksums to confirm your download |
 
 ## Install
@@ -24,14 +24,14 @@ Download the files for your system (open each file above, then **Download raw fi
 
 ```sh
 cd ~/Downloads
-sudo apt install ./fstab-manager_0.8.0-1_amd64.deb ./fstabctl_0.8.0-1_all.deb
+sudo apt install ./fstab-manager_0.8.1-1_amd64.deb ./fstabctl_0.8.1-1_all.deb
 ```
 
 **Fedora, openSUSE**
 
 ```sh
 cd ~/Downloads
-sudo dnf install ./fstab-manager-0.8.0-1.x86_64.rpm ./fstabctl-0.8.0-1.noarch.rpm
+sudo dnf install ./fstab-manager-0.8.1-1.x86_64.rpm ./fstabctl-0.8.1-1.noarch.rpm
 ```
 
 The package manager adds anything missing, such as the system's WebKitGTK library. Then open **fstab Manager** from
